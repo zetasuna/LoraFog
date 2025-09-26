@@ -61,7 +61,7 @@ lorawan-fog/                 # root repo
 ├── web/                     # frontend (if nhỏ, tĩnh) or reference assets
 ├── configs/                 # cấu hình môi trường (yaml/env.example)
 ├── deployments/             # docker, k8s manifests, terraform (sau này)
-│   ├── docker/              # Dockerfile templates và docker-compose.yml
+│   ├── docker/              # Dockerfile templates và compose.yaml
 │   └── k8s/                 # k8s manifests (deployment, svc)
 ├── scripts/                 # build / helper scripts (build.sh, run_local.sh)
 ├── migrations/              # database migration files (if dùng postgres)
@@ -104,9 +104,9 @@ Gợi ý: cho môi trường phát triển, image dùng `golang:1.21-alpine` đ�
 
 ---
 
-## 4. Ví dụ `docker-compose.yml` (local dev)
+## 4. Ví dụ `compose.yaml` (local dev)
 
-`deployments/docker/docker-compose.yml`
+`deployments/docker/compose.yaml`
 
 ```yaml
 version: "3.8"
@@ -233,7 +233,7 @@ jobs:
 
 1. `cp configs/.env.example .env` và chỉnh thông số.
 2. `make build` — build tất cả binary vào `./bin/`.
-3. `docker-compose -f deployments/docker/docker-compose.yml up --build`
+3. `docker-compose -f deployments/docker/compose.yaml up --build`
 4. Kiểm tra logs: `docker-compose logs -f appserver`
 5. Dùng `curl` hoặc trình duyệt đến `http://localhost:9999` và websocket `ws://localhost:9999/ws`.
 

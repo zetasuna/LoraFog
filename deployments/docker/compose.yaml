@@ -1,0 +1,50 @@
+networks:
+  lorawan-net:
+    driver: bridge
+
+services:
+  sensor:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile.app
+    command: ["/app", "--mode=sensor"]
+    networks:
+      - lorawan-net
+    depends_on:
+      - gateway
+
+  gateway:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile.app
+    command: ["/app", "--mode=gateway"]
+    ports:
+      - "1680:1680/udp" # nếu gateway lắng nghe UDP
+    networks:
+      - lorawan-net
+    environment:
+      - NS_ENDPOINT=http://network-server:10000/uplink
+
+  network-server:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile.app
+    command: ["/app", "--mode=ns"]
+    ports:
+      - "10000:10000"
+    networks:
+      - lorawan-net
+    environment:
+      - APP_SERVER=http://appserver:9999/sensor
+
+  appserver:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile.app
+    command: ["/app", "--mode=app"]
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./data:/data
+    networks:
+      - lorawan-net
