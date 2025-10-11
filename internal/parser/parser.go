@@ -21,8 +21,8 @@ import (
 // Returns error on invalid format.
 func ParseTelemetryCSV(line string) (model.VehicleData, error) {
 	fields := strings.Split(strings.TrimSpace(line), ",")
-	if len(fields) != 6 {
-		return model.VehicleData{}, fmt.Errorf("expected 6 fields, got %d", len(fields))
+	if len(fields) != 8 {
+		return model.VehicleData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
 	}
 
 	lat, err := strconv.ParseFloat(fields[1], 64)
