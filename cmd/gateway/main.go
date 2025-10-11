@@ -26,7 +26,7 @@ import (
 func main() {
 	serialDev := flag.String("lora", "/dev/serial0", "LoRa serial device")
 	baud := flag.Int("baud", 9600, "serial baud")
-	fogAddr := flag.String("fog", "http://192.168.245:10000", "Fog base URL")
+	fogAddr := flag.String("fog", "http://192.168.2.245:3001", "Fog base URL")
 	gatewayID := flag.String("id", "GW01", "gateway id")
 	flag.Parse()
 
