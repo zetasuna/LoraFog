@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,14 +56,19 @@ func main() {
 		go func(id int) {
 			defer wg.Done()
 			for v := range forwardCh {
-				b, _ := json.Marshal(v)
-				resp, err := client.Post(*fogAddr+"/ingest", "application/json", bytes.NewReader(b))
+				// b, _ := json.Marshal(v)
+				// resp, err := client.Post(*fogAddr+"/ingest", "application/json", bytes.NewReader(b))
+				// // Convert struct -> CSV string
+				csvLine := parser.VehicleToCSV(v)
+				resp, err := client.Post(*fogAddr+"/api/telemetry", "text/plain", strings.NewReader(csvLine))
 				if err != nil {
 					log.Printf("forward worker %d post err: %v", id, err)
 					continue
 				}
 				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
+				if cerr := resp.Body.Close(); cerr != nil {
+					log.Printf("warning: forward worker %d close body: %v", id, cerr)
+				}
 			}
 		}(i)
 	}
