@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"strconv"
@@ -155,8 +156,10 @@ func main() {
 			lat, lon, err := readGPSFromDevice(*gpsDev, *gpsBaud, 2*time.Second)
 			if err != nil {
 				log.Printf("gps read failed: %v; using fallback", err)
-				lat = 21.028511
-				lon = 105.804817
+				// lat = 21.028511
+				// lon = 105.804817
+				lat = 21.0285 + (rand.Float64()-0.5)*0.01
+				lon = 105.8048 + (rand.Float64()-0.5)*0.01
 			}
 			head := math.Mod(float64(time.Now().UnixNano()/1e6)/100.0, 360.0)
 			// left/right speed from local sensors (not implemented) — placeholder
