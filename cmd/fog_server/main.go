@@ -9,6 +9,7 @@ package main
 
 import (
 	"LoraFog/internal/model"
+	"LoraFog/internal/parser"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -85,11 +86,19 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		log.Printf("ingested: %s at %s", vd.VehicleID, vd.Timestamp)
+
+		// Convert JSON -> CSV for unified wire format
+		csvLine := parser.VehicleToCSV(vd)
+		log.Printf("ingested: %s at %s -> CSV: %s", vd.VehicleID, vd.Timestamp, csvLine)
+		// log.Printf("ingested: %s at %s", vd.VehicleID, vd.Timestamp)
+
 		// broadcast to WS clients
 		mu.Lock()
 		for c := range clients {
-			_ = c.WriteJSON(vd)
+			// _ = c.WriteJSON(vd)
+			if err := c.WriteMessage(websocket.TextMessage, []byte(csvLine)); err != nil {
+				log.Printf("ws write err: %v", err)
+			}
 		}
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
@@ -116,8 +125,12 @@ func main() {
 				}
 			}()
 			for {
-				var v any
-				if err := c.ReadJSON(&v); err != nil {
+				// var v any
+				// if err := c.ReadJSON(&v); err != nil {
+				// 	break
+				// }
+				// Not expect messages from the client => detect close
+				if _, _, err := c.ReadMessage(); err != nil {
 					break
 				}
 			}

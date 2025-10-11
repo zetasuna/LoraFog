@@ -3,6 +3,10 @@
 // CSV telemetry wire format (vehicle -> gateway):
 //
 //	VEHICLE_ID,LAT,LON,HEAD,LEFT_SPEED,RIGHT_SPEED
+//
+// CSV control wire format (fog -> vehicle):
+//
+//	VEHICLE_ID,PAYLOAD,MSGID
 package parser
 
 import (
@@ -63,4 +67,11 @@ func ControlToCSV(ctl model.ControlMessage) string {
 	}
 	payload := strings.ReplaceAll(ctl.Payload, ",", ";")
 	return fmt.Sprintf("%s,%s,%s", ctl.VehicleID, payload, msgID)
+}
+
+// VehicleToCSV converts a VehicleData struct into CSV format to send over LoRa.
+// Format: VEHICLE_ID,LAT,LON,HEAD,LEFT_SPEED,RIGHT_SPEED
+func VehicleToCSV(v model.VehicleData) string {
+	return fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f",
+		v.VehicleID, v.Lat, v.Lon, v.Head, v.LeftSpd, v.RightSpd)
 }
