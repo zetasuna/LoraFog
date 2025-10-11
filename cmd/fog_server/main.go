@@ -89,7 +89,8 @@ func main() {
 
 		// Convert JSON -> CSV for unified wire format
 		csvLine := parser.VehicleToCSV(vd)
-		log.Printf("ingested: %s at %s -> CSV: %s", vd.VehicleID, vd.Timestamp, csvLine)
+		// log.Printf("ingested: %s at %s -> CSV: %s", vd.VehicleID, vd.Timestamp, csvLine)
+		log.Printf("ingested: %s -> CSV: %s", vd.VehicleID, csvLine)
 		// log.Printf("ingested: %s at %s", vd.VehicleID, vd.Timestamp)
 
 		// broadcast to WS clients
@@ -139,11 +140,7 @@ func main() {
 
 	// POST /control
 	http.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			VehicleID string `json:"vehicle_id"`
-			Payload   string `json:"payload"`
-			MsgID     string `json:"msg_id,omitempty"`
-		}
+		var req model.ControlMessage
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -154,7 +151,7 @@ func main() {
 			http.Error(w, "no gateway for vehicle", http.StatusNotFound)
 			return
 		}
-		ctl := model.ControlMessage{VehicleID: req.VehicleID, Payload: req.Payload, MsgID: req.MsgID}
+		ctl := model.ControlMessage{VehicleID: req.VehicleID, Mode: req.Mode, Spd: req.Spd, Lat: req.Lat, Lon: req.Lon, Kp: req.Kp, Ki: req.Ki, Kd: req.Kd}
 		// forward to gateway /command
 		go func() {
 			b, _ := json.Marshal(ctl)

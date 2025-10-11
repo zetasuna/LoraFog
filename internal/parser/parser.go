@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ParseTelemetryCSV parses a CSV telemetry line into model.VehicleData.
@@ -34,44 +33,56 @@ func ParseTelemetryCSV(line string) (model.VehicleData, error) {
 	if err != nil {
 		return model.VehicleData{}, errors.New("invalid lon")
 	}
-	head, err := strconv.ParseFloat(fields[3], 64)
+	headCur, err := strconv.ParseFloat(fields[3], 64)
 	if err != nil {
-		return model.VehicleData{}, errors.New("invalid head")
+		return model.VehicleData{}, errors.New("invalid head_current")
 	}
-	left, err := strconv.ParseFloat(fields[4], 64)
+	headTar, err := strconv.ParseFloat(fields[4], 64)
+	if err != nil {
+		return model.VehicleData{}, errors.New("invalid head_target")
+	}
+	left, err := strconv.ParseFloat(fields[5], 64)
 	if err != nil {
 		return model.VehicleData{}, errors.New("invalid left_speed")
 	}
-	right, err := strconv.ParseFloat(fields[5], 64)
+	right, err := strconv.ParseFloat(fields[6], 64)
 	if err != nil {
 		return model.VehicleData{}, errors.New("invalid right_speed")
+	}
+	pid, err := strconv.ParseFloat(fields[7], 64)
+	if err != nil {
+		return model.VehicleData{}, errors.New("invalid pid")
 	}
 
 	return model.VehicleData{
 		VehicleID: fields[0],
 		Lat:       lat,
 		Lon:       lon,
-		Head:      head,
+		HeadCur:   headCur,
+		HeadTar:   headTar,
 		LeftSpd:   left,
 		RightSpd:  right,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		PID:       pid,
+		// Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
 // ControlToCSV converts a ControlMessage into CSV to send over LoRa.
 // Format: VEHICLE_ID,PAYLOAD,MSGID
 func ControlToCSV(ctl model.ControlMessage) string {
-	msgID := ctl.MsgID
-	if msgID == "" {
-		msgID = strconv.FormatInt(time.Now().UnixNano(), 10)
-	}
-	payload := strings.ReplaceAll(ctl.Payload, ",", ";")
-	return fmt.Sprintf("%s,%s,%s", ctl.VehicleID, payload, msgID)
+	// msgID := ctl.MsgID
+	// if msgID == "" {
+	// 	msgID = strconv.FormatInt(time.Now().UnixNano(), 10)
+	// }
+	// payload := strings.ReplaceAll(ctl.Payload, ",", ";")
+	// return fmt.Sprintf("%s,%s,%s", ctl.VehicleID, payload, msgID)
+	return fmt.Sprintf("%s,%.1f,%.2f,%.6f,%.6f,%.2f,%.2f,%.2f",
+		ctl.VehicleID, ctl.Mode, ctl.Spd, ctl.Lat, ctl.Lon, ctl.Kp, ctl.Ki, ctl.Kd)
 }
 
 // VehicleToCSV converts a VehicleData struct into CSV format to send over LoRa.
 // Format: VEHICLE_ID,LAT,LON,HEAD,LEFT_SPEED,RIGHT_SPEED
 func VehicleToCSV(v model.VehicleData) string {
-	return fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f",
-		v.VehicleID, v.Lat, v.Lon, v.Head, v.LeftSpd, v.RightSpd)
+	return fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.1f",
+		v.VehicleID, v.Lat, v.Lon, v.HeadCur, v.HeadTar, v.LeftSpd, v.RightSpd, v.PID)
 }

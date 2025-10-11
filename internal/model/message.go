@@ -6,17 +6,23 @@ type VehicleData struct {
 	VehicleID string  `json:"vehicle_id"`
 	Lat       float64 `json:"lat"`
 	Lon       float64 `json:"lon"`
-	Head      float64 `json:"head"`
+	HeadCur   float64 `json:"head_current"`
+	HeadTar   float64 `json:"head_target"`
 	LeftSpd   float64 `json:"left_speed"`
 	RightSpd  float64 `json:"right_speed"`
-	Timestamp string  `json:"timestamp"` // ISO8601 formatted on gateway
+	PID       float64 `json:"pid"`
 }
 
 // ControlMessage is used by Fog -> Gateway (JSON). Gateway converts to CSV for LoRa.
 type ControlMessage struct {
-	VehicleID string `json:"vehicle_id"`
-	Payload   string `json:"payload"` // command payload (plain string)
-	MsgID     string `json:"msg_id"`  // optional message id
+	VehicleID string  `json:"vehicle_id"`
+	Mode      float64 `json:"mode"`
+	Spd       float64 `json:"speed"`
+	Lat       float64 `json:"lat"`
+	Lon       float64 `json:"lon"`
+	Kp        float64 `json:"kp"`
+	Ki        float64 `json:"ki"`
+	Kd        float64 `json:"kd"`
 }
 
 // AckMessage is a simple ack structure.

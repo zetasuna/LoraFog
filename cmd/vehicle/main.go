@@ -161,11 +161,13 @@ func main() {
 				lat = 21.0285 + (rand.Float64()-0.5)*0.01
 				lon = 105.8048 + (rand.Float64()-0.5)*0.01
 			}
-			head := math.Mod(float64(time.Now().UnixNano()/1e6)/100.0, 360.0)
+			headCur := math.Mod(float64(time.Now().UnixNano()/1e6)/100.0, 360.0)
+			headTar := math.Mod(float64(time.Now().UnixNano()/1e6)/100.0, 360.0)
 			// left/right speed from local sensors (not implemented) — placeholder
 			left := 12.0
 			right := 12.0
-			v := fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f", *vehicleID, lat, lon, head, left, right)
+			pid := 1.0
+			v := fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.1f", *vehicleID, lat, lon, headCur, headTar, left, right, pid)
 			if err := l.WriteLine(v); err != nil {
 				log.Printf("lora write err: %v", err)
 			} else {
