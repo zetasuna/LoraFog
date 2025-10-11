@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -60,6 +61,7 @@ func main() {
 				// resp, err := client.Post(*fogAddr+"/ingest", "application/json", bytes.NewReader(b))
 				// // Convert struct -> CSV string
 				csvLine := parser.VehicleToCSV(v)
+				fmt.Printf("forward: %s", csvLine)
 				resp, err := client.Post(*fogAddr+"/api/telemetry", "text/plain", strings.NewReader(csvLine))
 				if err != nil {
 					log.Printf("forward worker %d post err: %v", id, err)
