@@ -3,46 +3,50 @@
 package main
 
 import (
-	"LoraFog/internal/lora"
 	"flag"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"time"
+
+	"go.bug.st/serial"
 )
 
 func main() {
-	dev := flag.String("dev", "/dev/serial0", "serial device to write telemetry into")
+	device := flag.String("device", "/dev/ttyS0", "serial device to write telemetry into")
 	baud := flag.Int("baud", 9600, "baud rate")
-	id := flag.String("id", "VEH_SIM_01", "simulated vehicle id")
-	interval := flag.Int("interval", 1000, "ms between messages")
 	flag.Parse()
-
-	port, err := lora.New(*dev, *baud)
+	port, err := serial.Open(*device, &serial.Mode{BaudRate: *baud})
 	if err != nil {
-		log.Fatalf("open serial: %v", err)
+		fmt.Printf("failed to open serial port %s: %v\n", port, err)
+		os.Exit(1)
 	}
 	defer func() {
-		if cerr := port.Close(); cerr != nil {
-			log.Printf("warning: close serial err: %v", cerr)
+		if err := port.Close(); err != nil {
+			log.Printf("warning: failed to close serial port: %v", err)
 		}
 	}()
 
-	log.Printf("simulator sending to %s every %dms", *dev, *interval)
-	tick := time.NewTicker(time.Duration(*interval) * time.Millisecond)
-	defer tick.Stop()
+	fmt.Printf("✅ GPS simulator started on %s (baud %d)\n", *device, *baud)
 
-	for range tick.C {
-		lat := 21.0285 + (rand.Float64()-0.5)*0.01
-		lon := 105.8048 + (rand.Float64()-0.5)*0.01
-		head := rand.Float64() * 360.0
-		left := 5.0 + rand.Float64()*20.0
-		right := 5.0 + rand.Float64()*20.0
-		line := fmt.Sprintf("%s,%.6f,%.6f,%.2f,%.2f,%.2f", *id, lat, lon, head, left, right)
-		if err := port.WriteLine(line); err != nil {
-			log.Printf("write err: %v", err)
+	for {
+		// Giả lập vị trí Hà Nội (gần Hồ Gươm)
+		lat := 21.0285 + (rand.Float64()-0.5)*0.001
+		lon := 105.8048 + (rand.Float64()-0.5)*0.001
+		// timeUTC := time.Now().UTC().Format("150405.00")
+
+		// Chuỗi NMEA $GPGGA đơn giản
+		nmea := fmt.Sprintf("$GPGGA,%.4f,N,%.4f,E,1,08,0.9,10.0,M,0.0,M,,*47\r\n",
+			lat, lon)
+
+		_, err = port.Write([]byte(nmea))
+		if err != nil {
+			fmt.Printf("write error: %v\n", err)
 		} else {
-			log.Printf("sent: %s", line)
+			fmt.Printf("sent: %s", nmea)
 		}
+
+		time.Sleep(1 * time.Second)
 	}
 }

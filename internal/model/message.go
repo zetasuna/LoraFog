@@ -25,6 +25,12 @@ type ControlMessage struct {
 	Kd        float64 `json:"kd"`
 }
 
+// GPSData is used by GPS
+type GPSData struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
 // AckMessage is a simple ack structure.
 type AckMessage struct {
 	MsgID string `json:"msg_id"`
