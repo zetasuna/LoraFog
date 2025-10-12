@@ -3,6 +3,7 @@
 package main
 
 import (
+	"LoraFog/internal/parser"
 	"flag"
 	"fmt"
 	"log"
@@ -34,11 +35,14 @@ func main() {
 		// Giả lập vị trí Hà Nội (gần Hồ Gươm)
 		lat := 21.0285 + (rand.Float64()-0.5)*0.001
 		lon := 105.8048 + (rand.Float64()-0.5)*0.001
+		latStr, latDir := parser.ToNMEACoord(lat, true)
+		lonStr, lonDir := parser.ToNMEACoord(lon, false)
 		// timeUTC := time.Now().UTC().Format("150405.00")
 
 		// Chuỗi NMEA $GPGGA đơn giản
-		nmea := fmt.Sprintf("$GPGGA,%.4f,N,%.4f,E,1,08,0.9,10.0,M,0.0,M,,*47\r\n",
-			lat, lon)
+		// nmea := fmt.Sprintf("$GPGGA,%.4f,N,%.4f,E,1,08,0.9,10.0,M,0.0,M,,*47\r\n",lat, lon)
+		nmea := fmt.Sprintf("$GPGGA,%s,%s,%s,%s,1,08,0.9,10.0,M,0.0,M,,*47\r\n",
+			latStr, latDir, lonStr, lonDir)
 
 		_, err = port.Write([]byte(nmea))
 		if err != nil {
@@ -47,6 +51,6 @@ func main() {
 			fmt.Printf("sent: %s", nmea)
 		}
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 }

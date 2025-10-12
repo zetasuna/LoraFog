@@ -33,3 +33,25 @@ func ParseNMEACoord(value string, dir string) (float64, error) {
 	}
 	return dec, nil
 }
+
+// ToNMEACoord converts NMEA decimal degrees to ddmm.mmmm.
+func ToNMEACoord(dec float64, isLat bool) (string, string) {
+	dir := "N"
+	if !isLat {
+		dir = "E"
+	}
+	if dec < 0 {
+		dec = -dec
+		if isLat {
+			dir = "S"
+		} else {
+			dir = "W"
+		}
+	}
+	deg := int(dec)
+	min := (dec - float64(deg)) * 60
+	if isLat {
+		return fmt.Sprintf("%02d%06.3f", deg, min), dir
+	}
+	return fmt.Sprintf("%03d%06.3f", deg, min), dir
+}
