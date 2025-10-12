@@ -44,8 +44,8 @@ func ReadStream(device string, baud int, out chan<- model.GPSData) error {
 		// 	continue
 		// }
 
-		lat, err1 := parser.ParseNMEACoord(parts[2], parts[3])
-		lon, err2 := parser.ParseNMEACoord(parts[4], parts[5])
+		lat, err1 := parser.ParseNMEACoord(parts[1], parts[2])
+		lon, err2 := parser.ParseNMEACoord(parts[3], parts[4])
 		log.Printf("gps data: %.6f, %.6f", lat, lon)
 		if err1 != nil || err2 != nil {
 			continue
