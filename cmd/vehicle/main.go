@@ -20,7 +20,7 @@ import (
 
 func main() {
 	vehicleID := flag.String("id", "00001", "vehicle id")
-	gpsDev := flag.String("gps", "/dev/ttyS0", "gps serial device")
+	gpsDev := flag.String("gps", "/tmp/ttyV1", "gps serial device")
 	gpsBaud := flag.Int("gpsbaud", 9600, "gps baudrate")
 	loraDev := flag.String("lora", "/dev/serial0", "lora serial device")
 	loraBaud := flag.Int("lorabaud", 9600, "lora baudrate")
