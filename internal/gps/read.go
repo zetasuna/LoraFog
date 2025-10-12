@@ -46,12 +46,12 @@ func ReadStream(device string, baud int, out chan<- model.GPSData) error {
 
 		lat, err1 := parser.ParseNMEACoord(parts[2], parts[3])
 		lon, err2 := parser.ParseNMEACoord(parts[4], parts[5])
+		log.Printf("gps data: %.6f, %.6f", lat, lon)
 		if err1 != nil || err2 != nil {
 			continue
 		}
 
 		out <- model.GPSData{Lat: lat, Lon: lon}
-		log.Printf("gps data: %.6f, %.6f", lat, lon)
 	}
 }
 
