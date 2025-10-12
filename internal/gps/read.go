@@ -35,14 +35,14 @@ func ReadStream(device string, baud int, out chan<- model.GPSData) error {
 		log.Printf("RAW GPS: %s", line)
 
 		// Chỉ xử lý câu NMEA hợp lệ
-		if !strings.HasPrefix(line, "$GPGGA") && !strings.HasPrefix(line, "$GNRMC") {
-			continue
-		}
+		// if !strings.HasPrefix(line, "$GPGGA") && !strings.HasPrefix(line, "$GNRMC") {
+		// 	continue
+		// }
 
 		parts := strings.Split(line, ",")
-		if len(parts) < 6 {
-			continue
-		}
+		// if len(parts) < 6 {
+		// 	continue
+		// }
 
 		lat, err1 := parser.ParseNMEACoord(parts[2], parts[3])
 		lon, err2 := parser.ParseNMEACoord(parts[4], parts[5])
