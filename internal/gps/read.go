@@ -32,6 +32,7 @@ func ReadStream(device string, baud int, out chan<- model.GPSData) error {
 			continue
 		}
 		line = strings.TrimSpace(line)
+		log.Printf("RAW GPS: %s", line)
 
 		// Chỉ xử lý câu NMEA hợp lệ
 		if !strings.HasPrefix(line, "$GPGGA") && !strings.HasPrefix(line, "$GNRMC") {

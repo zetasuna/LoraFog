@@ -28,7 +28,7 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("✅ GPS simulator started on %s (baud %d)\n", *device, *baud)
+	fmt.Printf("GPS simulator started on %s (baud %d)\n", *device, *baud)
 
 	for {
 		// Giả lập vị trí Hà Nội (gần Hồ Gươm)
