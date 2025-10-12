@@ -104,13 +104,29 @@ func main() {
 
 	// HTTP /command endpoint to accept ControlMessage from Fog (or admin)
 	http.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
-		var ctl model.ControlMessage
-		if err := json.NewDecoder(r.Body).Decode(&ctl); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// var ctl model.ControlMessage
+		// if err := json.NewDecoder(r.Body).Decode(&ctl); err != nil {
+		// 	http.Error(w, err.Error(), http.StatusBadRequest)
+		// 	return
+		// }
+		// convert to CSV: VEHICLE_ID,PAYLOAD,MSGID
+		// csv := parser.ControlToCSV(ctl)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
 			return
 		}
-		// convert to CSV: VEHICLE_ID,PAYLOAD,MSGID
-		csv := parser.ControlToCSV(ctl)
+		if cerr := r.Body.Close(); cerr != nil {
+			log.Printf("warning: error closing request body: %v", cerr)
+		}
+
+		csv := strings.TrimSpace(string(body))
+		if csv == "" {
+			http.Error(w, "empty command", http.StatusBadRequest)
+			return
+		}
+		log.Printf("Received command text: %s", csv)
+
 		select {
 		case sendCh <- csv:
 			w.WriteHeader(http.StatusAccepted)
