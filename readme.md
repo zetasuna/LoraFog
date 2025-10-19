@@ -215,7 +215,8 @@ EncodeControl(c model.ControlMessage) (string, error)
 DecodeControl(s string) (model.ControlMessage, error)
 ```
 
-> 💡 New formats (e.g., protobuf, CBOR) can be added simply by creating a new struct implementing `Parser`.
+> 💡 New formats (e.g., protobuf, CBOR) can be added simply
+> by creating a new struct implementing `Parser`.
 
 ---
 
@@ -316,13 +317,6 @@ func (p *ProtobufParser) EncodeTelemetry(v model.VehicleData) (string, error) { 
 ```
 
 Then register it in `System.initParsers()`.
-
----
-
-## 📜 License
-
-This project is licensed under the **MIT License**.
-You are free to use, modify, and distribute it for educational or commercial purposes.
 
 ---
 
