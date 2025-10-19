@@ -2,350 +2,336 @@
 Đồ án tốt nghiệp: Triển khai LoraWan cho xe tự hành
 ---
 
-# LoRaWAN Fog for Autonomous Vehicles — Deployment Document (Version 1)
+# 📡 LoraFog – Modular LoRaWAN Fog Computing System (Golang OOP)
 
-- **Mục tiêu:**
-  Tài liệu này mô tả một phương án triển khai mô hình **fog computing** cho mạng LoRaWAN
-  dùng trong hệ thống truyền dữ liệu cho xe tự hành (đề tài tốt nghiệp đơn giản).
-- Ứng dụng chính viết bằng **Go (Golang)**.
+> A modular, object-oriented Golang system for distributed telemetry collection and control over LoRa networks.
+> The system supports vehicles, gateways, and fog servers — all orchestrated from a single configuration file.
 
 ---
 
-## 1. Tổng quan kiến trúc
+## 📑 Table of Contents
 
-Kiến trúc gồm các thành phần chính:
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Features](#features)
+4. [Project Structure](#project-structure)
+5. [Configuration (`config.yml`)](#configuration-configyml)
+6. [Component Details](#component-details)
+   - [System](#system)
+   - [Fog Server](#fog-server)
+   - [Gateway](#gateway)
+   - [Vehicle](#vehicle)
 
-1. **Simulator (Sensor)**
-   Mô phỏng các cảm biến trên xe (vị trí GPS, tốc độ, trạng thái cảm biến)
-   Gửi payload theo định kỳ qua UDP tới Gateway địa phương.
-2. **Gateway (Fog Gateway)**
-   Nhận UDP từ sensor
-   Chuyển tiếp (forward) dữ liệu tới Network Server
-   Cũng có thể thực hiện một số xử lý biên (edge processing): lọc, nén, tiền xử lý để giảm băng thông.
-3. **Network Server (Fog / Regional)**
-   Nhận uplink từ Gateway (HTTP POST)
-   Giải mã LoRaWAN (nếu có)
-   Xác thực DevAddr / AppKey
-   Định tuyến tới Application Server
-   Có thể chạy tại rìa (fog) hoặc cloud tuỳ tầm
-4. **Application Server**
-   Lưu trữ dữ liệu cảm biến (SQLite / Postgres)
-   Cung cấp API REST/WebSocket cho dashboard/clients
-5. **Dashboard / Web UI**
-   Hiển thị realtime dữ liệu
-   Kết nối qua WebSocket tới Application Server
-6. **Optional: Message Broker (MQTT)** (Nếu muốn tách khâu realtime và lưu trữ)
-
-Mô hình fog cho xe tự hành có thể đặt Gateway + Network Server ở trạm gác/edge node gần khu vực hoạt động (ví dụ bến cảng, trạm dừng)
-Còn Application Server có thể là cloud hoặc vùng local cluster.
+7. [Parser Abstraction](#parser-abstraction)
+8. [Device Abstraction](#device-abstraction)
+9. [Build & Run](#build--run)
+10. [Development Guidelines](#development-guidelines)
+11. [Extensibility](#extensibility)
+12. [License](#license)
 
 ---
 
-## 2. Cấu trúc thư mục tiêu chuẩn Golang (gợi ý)
+## 🚀 Overview
+
+**LoraFog** is a modular Golang framework designed for **fog computing over LoRa networks**, typically used in remote telemetry and control systems such as:
+
+- Vessel monitoring (offshore boats)
+- Smart agriculture
+- Distributed IoT data collection
+
+The system integrates three main actors:
+
+1. **Vehicles** — collect GPS and telemetry data.
+2. **Gateways** — receive telemetry from vehicles via LoRa, convert formats, and forward to the fog.
+3. **Fog Server** — central node that aggregates telemetry, serves websocket clients, and dispatches control messages.
+
+Everything is configured and launched **from a single entry point (`main.go`)** using a YAML configuration file.
+
+---
+
+## 🧠 Architecture
 
 ```
-lorawan-fog/                 # root repo
-├── cmd/                     # programs entrypoints
-│   ├── sensor/              # sensor simulator binary (cmd/sensor/main.go)
-│   ├── gateway/             # gateway binary (cmd/gateway/main.go)
-│   └── appserver/           # application server binary (cmd/appserver/main.go)
-├── internal/                # private application code (non-public)
-│   ├── ns/                  # network-server logic
-│   ├── gw/                  # gateway helpers
-│   ├── sensor/              # sensor simulator logic
-│   ├── db/                  # database layer (migrations, dao)
-│   └── ws/                  # websocket hub
-├── pkg/                     # public packages (if muốn tái sử dụng)
-│   └── lorawan/             # utils: lora encoding/decoding
-├── api/                     # openapi / swagger spec (yaml/json)
-├── web/                     # frontend (if nhỏ, tĩnh) or reference assets
-├── configs/                 # cấu hình môi trường (yaml/env.example)
-├── deployments/             # docker, k8s manifests, terraform (sau này)
-│   ├── docker/              # Dockerfile templates và compose.yaml
-│   └── k8s/                 # k8s manifests (deployment, svc)
-├── scripts/                 # build / helper scripts (build.sh, run_local.sh)
-├── migrations/              # database migration files (if dùng postgres)
-├── Makefile                 # helper commands
-├── go.mod
-└── README.md
+           +------------------------+
+           |      Fog Server        |
+           |------------------------|
+           |  /ingest (telemetry)   |
+           |  /control (commands)   |
+           |  /ws (websocket)       |
+           +-----------^------------+
+                       |
+                JSON / CSV over HTTP
+                       |
+           +-----------v------------+
+           |        Gateway         |
+           |------------------------|
+           | Receives from Vehicle  |
+           | via LoRa (CSV/JSON)    |
+           | Converts and sends to  |
+           | Fog (configurable)     |
+           +-----------^------------+
+                       |
+                  LoRa Serial Link
+                       |
+           +-----------v------------+
+           |        Vehicle         |
+           |------------------------|
+           | GPS + Sensors          |
+           | Send telemetry (CSV)   |
+           | Receive controls       |
+           +------------------------+
 ```
-
-**Lý do phân chia:**
-
-- `cmd/` cho mỗi binary riêng dễ build, release.
-- `internal/` chứa logic không export ra ngoài (bảo vệ boundary).
-- `pkg/` cho code có thể tái sử dụng.
-- `deployments/` để gom manifest và Dockerfile.
 
 ---
 
-## 3. Ví dụ Dockerfile (cho binary Go)
+## ✨ Features
 
-`deployments/docker/Dockerfile.app`
-
-```dockerfile
-# Build stage
-FROM golang:1.21-alpine AS builder
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/app ./cmd/appserver
-
-# Final minimal image
-FROM scratch
-COPY --from=builder /out/app /app
-# (Nếu cần CA certs, chuyển sang alpine:3.x hoặc add ca-certificates)
-EXPOSE 8080
-ENTRYPOINT ["/app"]
-```
-
-Gợi ý: cho môi trường phát triển, image dùng `golang:1.21-alpine` để debug; production có thể multi-stage với `scratch` hoặc `distroless`.
+✅ **Single process orchestration** (Fog, Gateways, Vehicles from one config)
+✅ **Object-Oriented design** for extensibility
+✅ **Dynamic format conversion** (CSV ↔ JSON) per gateway
+✅ **Unified lifecycle management (Start/Stop)**
+✅ **Serial communication abstraction** (`Device` interface)
+✅ **Custom parser system** for future protocols
+✅ **WebSocket broadcasting** from FogServer
+✅ **Graceful shutdown** and error-safe I/O
+✅ **Full configuration via YAML**
 
 ---
 
-## 4. Ví dụ `compose.yaml` (local dev)
+## 🏗️ Project Structure
 
-`deployments/docker/compose.yaml`
+```
+LoraFog/
+├── cmd/
+│   └── lora_fog/
+│       └── main.go              # Single entry point
+├── configs/
+│   └── config.yml               # System configuration
+├── internal/
+│   ├── core/                    # Runtime components
+│   │   ├── system.go
+│   │   ├── gateway.go
+│   │   ├── vehicle.go
+│   │   └── fog_server.go
+│   ├── device/                  # Device abstraction (LoRa, Serial)
+│   │   ├── device.go
+│   │   └── serial_device.go
+│   ├── gps/                     # GPS reader (NMEA)
+│   │   └── gps.go
+│   ├── parser/                  # Format parser implementations
+│   │   ├── parser.go
+│   │   ├── csv_parser.go
+│   │   ├── json_parser.go
+│   │   └── nmea.go
+│   ├── model/                   # Shared data models
+│   │   ├── config.go
+│   │   └── message.go
+│   └── util/                    # Utilities
+│       └── logger.go
+└── go.mod
+```
+
+---
+
+## ⚙️ Configuration (`config.yml`)
 
 ```yaml
-version: "3.8"
-services:
-  sensor:
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile.app
-    command: ["/app", "--mode=sensor"]
-    networks:
-      - lorawan-net
-    depends_on:
-      - gateway
+global:
+  wire_format: "csv" # default format (csv/json)
+  fog_addr: ":10000" # fog server listen address
 
-  gateway:
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile.app
-    command: ["/app", "--mode=gateway"]
-    ports:
-      - "1680:1680/udp" # nếu gateway lắng nghe UDP
-    networks:
-      - lorawan-net
-    environment:
-      - NS_ENDPOINT=http://network-server:10000/uplink
+gateways:
+  - id: "GW01"
+    lora_device: "/dev/ttyUSB0"
+    lora_baud: 9600
+    wire_in: "csv" # format received from vehicle
+    wire_out: "json" # format sent to fog
+    fog_url: "http://127.0.0.1:10000"
+    vehicles: ["V01"]
 
-  network-server:
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile.app
-    command: ["/app", "--mode=ns"]
-    ports:
-      - "10000:10000"
-    networks:
-      - lorawan-net
-    environment:
-      - APP_SERVER=http://appserver:9999/sensor
-
-  appserver:
-    build:
-      context: ../../
-      dockerfile: deployments/docker/Dockerfile.app
-    command: ["/app", "--mode=app"]
-    ports:
-      - "9999:9999"
-    volumes:
-      - ./data:/data
-    networks:
-      - lorawan-net
-
-networks:
-  lorawan-net:
-    driver: bridge
+vehicles:
+  - id: "V01"
+    lora_device: "/dev/ttyS1"
+    lora_baud: 9600
+    gps_device: "/tmp/ttyGPS0"
+    gps_baud: 9600
+    telemetry_interval_ms: 2000
+    wire_format: "csv"
 ```
 
-> **Ghi chú:**
-> Trong repo demo trước đây (nếu bạn đã có `sensor.go`, `gateway.go`, `network-server.go`, `app.go`)
-> thì `--mode=` ở command có thể chọn run logic tương ứng (như một binary đa năng).
-> Tuy nhiên với sản phẩm thực tế nên tách binary rõ ràng.
+---
+
+## ⚙️ Component Details
+
+### 🧩 System
+
+- Loads and validates configuration.
+- Initializes all parsers and components.
+- Starts FogServer, then all Gateways and Vehicles.
+- Handles graceful shutdown (SIGINT / SIGTERM).
+
+### ☁️ Fog Server
+
+- HTTP server that exposes:
+  - `/register`: register gateways
+  - `/ingest`: receive telemetry
+  - `/control`: send control messages
+  - `/ws`: broadcast telemetry to WebSocket clients
+
+- In-memory registry maps `vehicleID → gatewayURL`.
+
+### 📡 Gateway
+
+- Communicates with multiple vehicles via LoRa.
+- Converts data format using:
+  - `wire_in`: for incoming data (e.g. CSV)
+  - `wire_out`: for outgoing data (e.g. JSON)
+
+- Forwards telemetry to Fog and handles `/command` HTTP endpoint.
+
+### 🚘 Vehicle
+
+- Reads GPS data from serial (NMEA).
+- Generates telemetry at fixed intervals.
+- Sends data to gateway via LoRa.
+- Listens for control messages (CSV or JSON).
 
 ---
 
-## 5. Biến môi trường (env) quan trọng
+## 🧩 Parser Abstraction
 
-- `NS_ENDPOINT` — URL network server.
-- `APP_SERVER` — URL application server.
-- `DB_DSN` — connection string cho DB (sqlite file path or postgres DSN).
-- `LOG_LEVEL` — debug/info/warn.
-- `LORA_APP_KEY`, `LORA_NWK_KEY` — (nếu cần giải mã LoRaWAN payload).
+| Interface    | Description                                                 |
+| ------------ | ----------------------------------------------------------- |
+| `Parser`     | Abstracts encoding/decoding for telemetry and control data. |
+| `CSVParser`  | Implements CSV-based encoding/decoding.                     |
+| `JSONParser` | Implements JSON-based encoding/decoding.                    |
 
-Tạo file mẫu `configs/.env.example` và hướng dẫn `cp configs/.env.example .env`.
+All parsers implement:
 
----
+```go
+EncodeTelemetry(v model.VehicleData) (string, error)
+DecodeTelemetry(s string) (model.VehicleData, error)
+EncodeControl(c model.ControlMessage) (string, error)
+DecodeControl(s string) (model.ControlMessage, error)
+```
 
-## 6. Database: SQLite vs Postgres
-
-- **SQLite**: thuận tiện cho demo/simple thesis, không cần server, file local. Dùng khi scale thấp.
-- **Postgres**: dùng khi cần concurrency, nhiều node, production. Bạn cần migrations (Flyway, golang-migrate).
-
-Trong Version 1, khuyến nghị bắt đầu với **SQLite** để đơn giản.
-
----
-
-## 7. Thông số mạng & cổng
-
-- Sensor -> Gateway: UDP port (ví dụ 1680)
-- Gateway -> Network Server: HTTP POST (ví dụ 10000)
-- Network Server -> App Server: HTTP POST (ví dụ 9999)
-- App Server -> Web UI: HTTP/WS (8080 hoặc 3000)
+> 💡 New formats (e.g., protobuf, CBOR) can be added simply by creating a new struct implementing `Parser`.
 
 ---
 
-## 8. CI/CD (gợi ý sơ bộ)
+## 🔌 Device Abstraction
 
-- **CI**: GitHub Actions / GitLab CI
-  - Steps: `go test ./...` → `golangci-lint` → `go vet` → build artifacts → build docker images in ephemeral runner
+| Interface      | Description                                        |
+| -------------- | -------------------------------------------------- |
+| `Device`       | Abstracts communication medium (LoRa, Serial).     |
+| `SerialDevice` | Uses `go.bug.st/serial` to perform I/O operations. |
 
-- **CD**: push images to registry (DockerHub / GitLab Container Registry) -> deploy via docker-compose on target host hoặc Kubernetes manifests.
+Interface:
 
-Ví dụ step build & push:
+```go
+type Device interface {
+    ReadLine(timeout time.Duration) (string, error)
+    WriteLine(s string) error
+    Close() error
+}
+```
+
+---
+
+## 🛠️ Build & Run
+
+### 1️⃣ Install dependencies
+
+```bash
+go mod tidy
+```
+
+### 2️⃣ Run the system
+
+```bash
+go run ./cmd/lora_fog
+```
+
+### 3️⃣ Observe logs
+
+You will see:
+
+```
+[Logger] Initialized
+[Fog] Listening on :10000
+[Gateway GW01] Started
+[Vehicle V01] Sending telemetry...
+```
+
+---
+
+## 🧑‍💻 Development Guidelines
+
+### Code Style
+
+- Follow Go standard formatting (`go fmt`).
+- Comments must follow GoDoc conventions.
+- Return early on errors (`if err != nil { return err }`).
+- Always check return values from `Close()` and `io.Copy()`.
+
+### Linting
+
+Use `golangci-lint`:
+
+```bash
+golangci-lint run ./...
+```
+
+Recommended `.golangci.yml`:
 
 ```yaml
-# .github/workflows/ci.yml (tóm tắt)
-name: CI
-on: [push]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with: { go-version: "1.21" }
-      - run: go test ./...
-      - run: golangci-lint run || true
-      - run: docker build -t ghcr.io/yourorg/lorawan-fog:latest .
-      - run: echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u USER --password-stdin
-      - run: docker push ghcr.io/yourorg/lorawan-fog:latest
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gosimple
+    - unused
+run:
+  timeout: 3m
 ```
 
 ---
 
-## 9. Local development workflow
+## 🔧 Extensibility
 
-1. `cp configs/.env.example .env` và chỉnh thông số.
-2. `make build` — build tất cả binary vào `./bin/`.
-3. `docker-compose -f deployments/docker/compose.yaml up --build`
-4. Kiểm tra logs: `docker-compose logs -f appserver`
-5. Dùng `curl` hoặc trình duyệt đến `http://localhost:9999` và websocket `ws://localhost:9999/ws`.
+The system is designed to be extended easily:
 
-```makefile
-.PHONY: build clean up run
-build:
- go build -o bin/sensor ./cmd/sensor
- go build -o bin/gateway ./cmd/gateway
- go build -o bin/appserver ./cmd/appserver
+- Add new **parser formats** (e.g. `ProtobufParser`).
+- Implement **new device types** (e.g. `BLEDevice`, `MQTTDevice`).
+- Extend `Vehicle` for autonomous control logic.
+- Use persistent database in `FogServer` (SQLite, PostgreSQL, etc).
 
-run-app:
- ./bin/appserver --config=configs/dev.yaml
+Example: to add a new parser:
 
-clean:
- rm -rf bin/
+```go
+type ProtobufParser struct {}
+func (p *ProtobufParser) EncodeTelemetry(v model.VehicleData) (string, error) { ... }
 ```
 
----
-
-## 10. Logging, Observability, và Debug
-
-- Logging: dùng `zap` hoặc `logrus` (structured logs).
-- Tracing: tích hợp OpenTelemetry (OTel) nếu muốn trace request xuyên component.
-- Metrics: expose `/metrics` (Prometheus) từ mỗi service.
-- Health checks: `/healthz` và `/readyz` endpoints.
+Then register it in `System.initParsers()`.
 
 ---
 
-## 11. Security / Key management
+## 📜 License
 
-- **Không** commit keys (AppKey, NwkKey) vào git.
-- Dùng `env` hoặc Vault/Secret Manager.
-- HTTPS / TLS cho endpoints quan trọng.
-- Access control cho API (token-based, JWT).
-
-Nếu cần giải mã LoRaWAN, giữ `AppSKey`/`NwkSKey` an toàn.
+This project is licensed under the **MIT License**.
+You are free to use, modify, and distribute it for educational or commercial purposes.
 
 ---
 
-## 12. Test plan (kiểm thử cơ bản)
+## 🧩 Author
 
-1. **Unit tests**: mỗi package có test tương ứng `*_test.go`.
-2. **Integration tests**: chạy `docker-compose` local với một sensor simulator gửi vài message và xác nhận app server nhận và lưu trữ.
-3. **End-to-end**: sensor -> gateway -> ns -> app -> websocket client hiển thị realtime.
-
-Ví dụ integration script: `scripts/integration_test.sh` sẽ:
-
-- lên network (docker-compose)
-- gửi 10 UDP packages tới gateway
-- query appserver DB để kiểm tra records
+**Nguyễn Đức Nam**
+Researcher / Developer – IoT, Edge & Fog Systems
+🚀 Built with Golang, passion, and minimalism.
 
 ---
 
-## 13. Mapping tới codebase hiện có (nếu bạn đã có các file trước đó)
-
-Nếu repository hiện tại đã có các file bạn từng cung cấp (ví dụ `sensor.go`, `gateway.go`, `network-server.go`, `app.go`):
-
-- Di chuyển logic vào `internal/sensor`, `internal/gw`, `internal/ns`, `internal/app` tương ứng.
-- Tạo `cmd/sensor/main.go` dùng package `internal/sensor`.
-- Tách cấu hình (flag/env) ra `configs/`.
-
----
-
-## 14. Kịch bản triển khai (sơ bộ)
-
-**Môi trường demo (một host):** dùng Docker Compose.
-
-**Môi trường prototype (fog + cloud):**
-
-- Fog node: chạy `gateway` + `network-server` tại cạnh (VM/edge box). Dùng docker-compose hoặc systemd + containerd.
-- Cloud: chạy `appserver` + DB + dashboard (k8s hoặc VM).
-
-**Môi trường production nhỏ:**
-
-- K8s cluster cho appserver, network-server. Gateways là lightweight container hoặc dịch vụ chạy trên các edge devices.
-
----
-
-## 15. Checklist Version 1 (những việc cần làm để hoàn thiện V1)
-
-- [ ] Thiết lập repo với cấu trúc ở mục 2.
-- [ ] Chuyển các file hiện có (sensor.go, gateway.go, network-server.go, app.go) vào `internal/` & tạo `cmd/` entrypoints.
-- [ ] Tạo `configs/.env.example` và `configs/dev.yaml`.
-- [ ] Viết Dockerfile cho từng service (hoặc multi-mode binary) và `docker-compose.yml`.
-- [ ] Implement basic REST endpoints và WebSocket hub.
-- [ ] Lưu thử nghiệm dữ liệu vào SQLite.
-- [ ] Viết script integration test gửi UDP và kiểm tra data flow.
-- [ ] Viết README hướng dẫn chạy local.
-
----
-
-## 16. Next steps / Phiên bản sau
-
-- Version 2: chuyển SQLite -> Postgres, thêm migrations, deploy-in-k8s manifests.
-- Thêm TLS/HTTPS và auth cho API.
-- Tích hợp OTel + Prometheus + Grafana.
-- Thử nghiệm thực tế với gateway hardware (nếu có) và LoRaWAN gateway stack.
-
----
-
-## 17. Tài liệu tham khảo & Links (gợi ý)
-
-- LoRaWAN specs (Truy cập khi cần)
-- Go project layout: \[standard project layout]
-- Docker docs / Docker Compose
-
----
-
-## 18. Phụ lục: Ví dụ API endpoints (gợi ý)
-
-- `POST /sensor` — nhận payload từ Network Server (JSON)
-- `GET /sensors` — list recent sensor data
-- `GET /sensors/{id}` — chi tiết
-- `GET /ws` — websocket endpoint (realtime)
-- `GET /metrics` — prometheus metrics
+### 💬 Example Screenshot
