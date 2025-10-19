@@ -6,6 +6,7 @@ package main
 import (
 	"LoraFog/internal/core"
 	"LoraFog/internal/util"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -18,8 +19,15 @@ import (
 func main() {
 	util.SetupLogger()
 
-	cfgPath := "configs/config.yml"
-	sys, err := core.NewSystem(cfgPath)
+	// cfgPath := "configs/config.yml"
+	// Allow dynamic config path via CLI flag
+	cfgPath := flag.String("c", "configs/config.yml", "path to configuration file")
+	flag.Parse()
+
+	log.Printf("[Main] Using config: %s", *cfgPath)
+
+	// Initialize system
+	sys, err := core.NewSystem(*cfgPath)
 	if err != nil {
 		log.Fatalf("failed to create system: %v", err)
 	}
@@ -33,5 +41,7 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
+	log.Println("[Main] Shutting down system...")
 	sys.StopAll()
+	log.Println("[Main] System stopped cleanly.")
 }
