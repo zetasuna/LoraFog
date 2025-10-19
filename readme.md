@@ -4,8 +4,10 @@
 
 # 📡 LoraFog – Modular LoRaWAN Fog Computing System (Golang OOP)
 
-> A modular, object-oriented Golang system for distributed telemetry collection and control over LoRa networks.
-> The system supports vehicles, gateways, and fog servers — all orchestrated from a single configuration file.
+> A modular, object-oriented Golang system
+> for distributed telemetry collection and control over LoRa networks.
+> The system supports vehicles, gateways, and fog servers
+> (all orchestrated from a single configuration file).
 
 ---
 
@@ -15,7 +17,7 @@
 2. [Architecture](#architecture)
 3. [Features](#features)
 4. [Project Structure](#project-structure)
-5. [Configuration (`config.yml`)](#configuration-configyml)
+5. [Configuration](#configuration)
 6. [Component Details](#component-details)
    - [System](#system)
    - [Fog Server](#fog-server)
@@ -27,13 +29,15 @@
 9. [Build & Run](#build--run)
 10. [Development Guidelines](#development-guidelines)
 11. [Extensibility](#extensibility)
-12. [License](#license)
 
 ---
 
-## 🚀 Overview
+## Overview
 
-**LoraFog** is a modular Golang framework designed for **fog computing over LoRa networks**, typically used in remote telemetry and control systems such as:
+**LoraFog** is a modular Golang framework
+designed for **fog computing over LoRa networks**,
+typically used in remote telemetry and control systems
+such as:
 
 - Vessel monitoring (offshore boats)
 - Smart agriculture
@@ -42,16 +46,19 @@
 The system integrates three main actors:
 
 1. **Vehicles** — collect GPS and telemetry data.
-2. **Gateways** — receive telemetry from vehicles via LoRa, convert formats, and forward to the fog.
-3. **Fog Server** — central node that aggregates telemetry, serves websocket clients, and dispatches control messages.
+2. **Gateways** — receive telemetry from vehicles via LoRa,
+   convert formats, and forward to the fog.
+3. **Fog Server** — central node that aggregates telemetry,
+   serves websocket clients, and dispatches control messages.
 
-Everything is configured and launched **from a single entry point (`main.go`)** using a YAML configuration file.
+Everything is configured and launched **from a single entry point (`main.go`)**
+using a YAML configuration file.
 
 ---
 
-## 🧠 Architecture
+## Architecture
 
-```
+```txt
            +------------------------+
            |      Fog Server        |
            |------------------------|
@@ -84,7 +91,7 @@ Everything is configured and launched **from a single entry point (`main.go`)** 
 
 ---
 
-## ✨ Features
+## Features
 
 ✅ **Single process orchestration** (Fog, Gateways, Vehicles from one config)
 ✅ **Object-Oriented design** for extensibility
@@ -98,9 +105,9 @@ Everything is configured and launched **from a single entry point (`main.go`)** 
 
 ---
 
-## 🏗️ Project Structure
+## Project Structure
 
-```
+```txt
 LoraFog/
 ├── cmd/
 │   └── lora_fog/
@@ -133,9 +140,10 @@ LoraFog/
 
 ---
 
-## ⚙️ Configuration (`config.yml`)
+## Configuration
 
 ```yaml
+# config.yml
 global:
   wire_format: "csv" # default format (csv/json)
   fog_addr: ":10000" # fog server listen address
@@ -161,16 +169,16 @@ vehicles:
 
 ---
 
-## ⚙️ Component Details
+## Component Details
 
-### 🧩 System
+### System
 
 - Loads and validates configuration.
 - Initializes all parsers and components.
 - Starts FogServer, then all Gateways and Vehicles.
 - Handles graceful shutdown (SIGINT / SIGTERM).
 
-### ☁️ Fog Server
+### Fog Server
 
 - HTTP server that exposes:
   - `/register`: register gateways
@@ -180,7 +188,7 @@ vehicles:
 
 - In-memory registry maps `vehicleID → gatewayURL`.
 
-### 📡 Gateway
+### Gateway
 
 - Communicates with multiple vehicles via LoRa.
 - Converts data format using:
@@ -189,7 +197,7 @@ vehicles:
 
 - Forwards telemetry to Fog and handles `/command` HTTP endpoint.
 
-### 🚘 Vehicle
+### Vehicle
 
 - Reads GPS data from serial (NMEA).
 - Generates telemetry at fixed intervals.
@@ -198,7 +206,7 @@ vehicles:
 
 ---
 
-## 🧩 Parser Abstraction
+## Parser Abstraction
 
 | Interface    | Description                                                 |
 | ------------ | ----------------------------------------------------------- |
@@ -220,7 +228,7 @@ DecodeControl(s string) (model.ControlMessage, error)
 
 ---
 
-## 🔌 Device Abstraction
+## Device Abstraction
 
 | Interface      | Description                                        |
 | -------------- | -------------------------------------------------- |
@@ -239,25 +247,25 @@ type Device interface {
 
 ---
 
-## 🛠️ Build & Run
+## Build & Run
 
-### 1️⃣ Install dependencies
+### Install dependencies
 
 ```bash
 go mod tidy
 ```
 
-### 2️⃣ Run the system
+### Run the system
 
 ```bash
 go run ./cmd/lora_fog
 ```
 
-### 3️⃣ Observe logs
+### Observe logs
 
 You will see:
 
-```
+```txt
 [Logger] Initialized
 [Fog] Listening on :10000
 [Gateway GW01] Started
@@ -266,7 +274,7 @@ You will see:
 
 ---
 
-## 🧑‍💻 Development Guidelines
+## Development Guidelines
 
 ### Code Style
 
@@ -300,7 +308,7 @@ run:
 
 ---
 
-## 🔧 Extensibility
+## Extensibility
 
 The system is designed to be extended easily:
 
@@ -320,7 +328,7 @@ Then register it in `System.initParsers()`.
 
 ---
 
-## 🧩 Author
+## Author
 
 **Nguyễn Đức Nam**
 Researcher / Developer – IoT, Edge & Fog Systems
@@ -328,4 +336,4 @@ Researcher / Developer – IoT, Edge & Fog Systems
 
 ---
 
-### 💬 Example Screenshot
+### Example Screenshot
