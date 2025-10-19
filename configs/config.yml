@@ -1,0 +1,21 @@
+global:
+  wire_format: "csv"
+  fog_addr: ":10000"
+
+gateways:
+  - id: "GW01"
+    lora_device: "/dev/serial0"
+    lora_baud: 9600
+    vehicles: ["V01"]
+    wire_in: "csv" # format nhận từ vehicle
+    wire_out: "json" # format gửi lên fog
+    fog_url: "http://127.0.0.1:10000"
+
+vehicles:
+  - id: "V01"
+    lora_device: "/dev/serial0"
+    lora_baud: 9600
+    gps_device: "/tmp/ttyV1"
+    gps_baud: 9600
+    telemetry_interval_ms: 3000
+    wire_format: "csv"

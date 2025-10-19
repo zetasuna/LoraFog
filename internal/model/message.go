@@ -1,7 +1,9 @@
-// Package model defines shared message structures for LoraFog.
+// Package model defines the core data structures exchanged between vehicles,
+// gateways, and the fog server, including telemetry and control messages.
 package model
 
-// VehicleData represents telemetry parsed from CSV and forwarded as JSON.
+// VehicleData represents telemetry information reported by a vehicle.
+// It is the common structure shared between vehicles, gateways and fog.
 type VehicleData struct {
 	VehicleID string  `json:"vehicle_id"`
 	Lat       float64 `json:"lat"`
@@ -13,7 +15,8 @@ type VehicleData struct {
 	PID       float64 `json:"pid"`
 }
 
-// ControlMessage is used by Fog -> Gateway (JSON). Gateway converts to CSV for LoRa.
+// ControlMessage represents a control command sent from Fog to a vehicle.
+// It can be encoded either as JSON or CSV depending on gateway configuration.
 type ControlMessage struct {
 	VehicleID string  `json:"vehicle_id"`
 	Mode      float64 `json:"mode"`
@@ -25,21 +28,16 @@ type ControlMessage struct {
 	Kd        float64 `json:"kd"`
 }
 
-// GPSData is used by GPS
+// GPSData represents a simple latitude/longitude reading.
 type GPSData struct {
 	Lat float64 `json:"lat"`
 	Lon float64 `json:"lon"`
 }
 
-// AckMessage is a simple ack structure.
-type AckMessage struct {
-	MsgID string `json:"msg_id"`
-	Ack   bool   `json:"ack"`
-}
-
-// GatewayRegistration is used when a gateway registers to Fog.
+// GatewayRegistration represents information sent by a gateway
+// to the fog when registering itself.
 type GatewayRegistration struct {
 	GatewayID string   `json:"gateway_id"`
-	URL       string   `json:"url"`      // public URL where Fog can reach gateway (HTTP)
-	Vehicles  []string `json:"vehicles"` // optional list of vehicle IDs this gateway serves
+	URL       string   `json:"url"`
+	Vehicles  []string `json:"vehicles"`
 }

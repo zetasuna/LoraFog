@@ -1,3 +1,5 @@
+// Package parser provides NMEA coordinate conversion utilities for GPS data.
+// It supports parsing from ddmm.mmmm format and conversion to decimal degrees.
 package parser
 
 import (
@@ -5,13 +7,13 @@ import (
 	"strconv"
 )
 
-// ParseNMEACoord converts NMEA ddmm.mmmm to decimal degrees.
+// ParseNMEACoord converts NMEA ddmm.mmmm format to decimal degrees.
+// For example, 2101.7102,N -> 21.0285033
 func ParseNMEACoord(value string, dir string) (float64, error) {
 	if len(value) < 4 {
-		return 0, fmt.Errorf("invalid nmea coord")
+		return 0, fmt.Errorf("invalid NMEA coord")
 	}
 	var degPart, minPart string
-	// latitude has 2 digit degrees vs lon 3 digits; detect by dir
 	if dir == "N" || dir == "S" {
 		degPart = value[:2]
 		minPart = value[2:]
@@ -34,7 +36,7 @@ func ParseNMEACoord(value string, dir string) (float64, error) {
 	return dec, nil
 }
 
-// ToNMEACoord converts NMEA decimal degrees to ddmm.mmmm.
+// ToNMEACoord converts decimal degrees to ddmm.mmmm string format.
 func ToNMEACoord(dec float64, isLat bool) (string, string) {
 	dir := "N"
 	if !isLat {
