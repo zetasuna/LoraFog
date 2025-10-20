@@ -33,3 +33,8 @@ vehicles:
     gps_baud: 9600
     telemetry_interval_ms: 4000
     wire_format: "csv"
+
+gps:
+  - id: "GPS01"
+    gps_device: "/tmp/ttyV0"
+    gps_baud: 9600

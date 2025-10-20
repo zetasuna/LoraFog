@@ -8,6 +8,7 @@ type Config struct {
 	Global   GlobalConfig    `yaml:"global"`
 	Gateways []GatewayConfig `yaml:"gateways"`
 	Vehicles []VehicleConfig `yaml:"vehicles"`
+	GPSes    []GpsConfig     `yaml:"gpses"`
 }
 
 // GlobalConfig defines shared defaults across the system.
@@ -36,4 +37,10 @@ type VehicleConfig struct {
 	GpsBaud             int    `yaml:"gps_baud"`
 	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms"`
 	WireFormat          string `yaml:"wire_format"`
+}
+
+type GpsConfig struct {
+	ID      string `yaml:"id"`
+	GpsDev  string `yaml:"gps_device"`
+	GpsBaud int    `yaml:"gps_baud"`
 }

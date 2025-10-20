@@ -41,7 +41,7 @@ func (v *Vehicle) Start() error {
 	// start GPS provider if present
 	if v.GpsDevice != nil {
 		ch := make(chan model.GpsData, 5)
-		stop, err := v.GpsDevice.Start(ch)
+		stop, err := v.GpsDevice.Read(ch)
 		if err == nil {
 			log.Printf("vehicle %s: gps start: success", v.ID)
 			v.gpsFn = stop

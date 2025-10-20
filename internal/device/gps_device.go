@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -25,9 +26,9 @@ func NewSerialGpsDevice(dev string, baud int) *GpsDevice {
 	return &GpsDevice{Device: dev, Baud: baud}
 }
 
-// Start begins reading NMEA sentences and sending valid coordinates to the provided channel.
+// Read begins reading NMEA sentences and sending valid coordinates to the provided channel.
 // Returns a stop function that signals the reading loop to exit.
-func (p *GpsDevice) Start(out chan<- model.GpsData) (func(), error) {
+func (p *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
 	port, err := serial.Open(p.Device, &serial.Mode{BaudRate: p.Baud})
 	if err != nil {
 		return nil, fmt.Errorf("open gps serial failed: %w", err)
@@ -69,4 +70,42 @@ func (p *GpsDevice) Start(out chan<- model.GpsData) (func(), error) {
 		}
 	}()
 	return func() { close(stop) }, nil
+}
+
+func (p *GpsDevice) WriteSimulation() error {
+	port, err := serial.Open(p.Device, &serial.Mode{BaudRate: p.Baud})
+	if err != nil {
+		return fmt.Errorf("open gps serial failed: %w", err)
+	}
+
+	defer func() {
+		if err := port.Close(); err != nil {
+			log.Printf("warning: failed to close serial port: %v", err)
+		}
+	}()
+
+	fmt.Printf("GPS simulator started on %s (baud %d)\n", p.Device, p.Baud)
+
+	for {
+		// Giả lập vị trí Hà Nội (gần Hồ Gươm)
+		lat := 21.0285 + (rand.Float64()-0.5)*0.001
+		lon := 105.8048 + (rand.Float64()-0.5)*0.001
+		latStr, latDir := parser.ToNMEACoord(lat, true)
+		lonStr, lonDir := parser.ToNMEACoord(lon, false)
+		timeUTC := time.Now().UTC().Format("150405.00")
+
+		// Chuỗi NMEA $GPGGA đơn giản
+		// nmea := fmt.Sprintf("$GPGGA,%.4f,N,%.4f,E,1,08,0.9,10.0,M,0.0,M,,*47\r\n",lat, lon)
+		nmea := fmt.Sprintf("$GPGGA,%s,%s,%s,%s,%s,1,08,0.9,10.0,M,0.0,M,,*47\r\n",
+			timeUTC, latStr, latDir, lonStr, lonDir)
+
+		_, err = port.Write([]byte(nmea))
+		if err != nil {
+			fmt.Printf("write error: %v\n", err)
+		} else {
+			fmt.Printf("sent: %s", nmea)
+		}
+
+		time.Sleep(2 * time.Second)
+	}
 }
