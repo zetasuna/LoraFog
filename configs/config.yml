@@ -1,6 +1,9 @@
 global:
   wire_format: "csv"
-  fog_addr: ":10000"
+
+servers:
+  - id: "SV01"
+    fog_addr: ":10000"
 
 gateways:
   - id: "GW01"
