@@ -70,7 +70,7 @@ func (f *FogServer) Start() {
 	mux.HandleFunc("/ws", f.handleWS)
 	mux.HandleFunc("/control", f.handleControl)
 	f.server = &http.Server{Addr: f.Addr, Handler: mux}
-	log.Printf("FogServer listening %s", f.Addr)
+	log.Printf("FogServer is listening on %s", f.Addr)
 	if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

@@ -68,8 +68,8 @@ func NewSystem(cfgPath string) (*System, error) {
 		}
 		gw := NewGateway(
 			gcfg.ID,
-			gcfg.LoRaDev,
-			gcfg.LoRaBaud,
+			gcfg.LoraDev,
+			gcfg.LoraBaud,
 			s.parsers[inFmt],
 			s.parsers[outFmt],
 			gcfg.FogURL,
@@ -87,10 +87,10 @@ func NewSystem(cfgPath string) (*System, error) {
 		p := s.parsers[wf]
 		veh := NewVehicle(
 			vcfg.ID,
-			vcfg.LoRaDev,
-			vcfg.LoRaBaud,
-			vcfg.GPSDev,
-			vcfg.GPSBaud,
+			vcfg.LoraDev,
+			vcfg.LoraBaud,
+			vcfg.GpsDev,
+			vcfg.GpsBaud,
 			time.Duration(vcfg.TelemetryIntervalMs)*time.Millisecond,
 			p,
 		)
@@ -115,6 +115,7 @@ func (s *System) StartAll() error {
 		if err := g.Start(); err != nil {
 			log.Printf("gateway %s start err: %v", g.ID, err)
 		} else {
+			log.Printf("gateway %s start: Success", g.ID)
 			s.Fog.RegisterGateway(g.ID, g.FogURL, g.Vehicles)
 		}
 	}
@@ -123,6 +124,8 @@ func (s *System) StartAll() error {
 	for _, v := range s.Vehicles {
 		if err := v.Start(); err != nil {
 			log.Printf("vehicle %s start err: %v", v.ID, err)
+		} else {
+			log.Printf("vehicle %s start: Success", v.ID)
 		}
 	}
 	s.started = true

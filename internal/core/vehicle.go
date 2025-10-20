@@ -1,10 +1,7 @@
-// Package core provides the Vehicle type, representing an autonomous agent that reads GPS data,
-// generates telemetry information, and transmits it via LoRa to the gateway.
 package core
 
 import (
 	"LoraFog/internal/device"
-	"LoraFog/internal/gps"
 	"LoraFog/internal/model"
 	"LoraFog/internal/parser"
 	"log"
@@ -16,25 +13,25 @@ import (
 // Vehicle represents a vehicle agent that reads GPS data and periodically
 // sends telemetry via an underlying Device (e.g., LoRa serial).
 type Vehicle struct {
-	ID       string
-	Device   device.Device
-	GPSProv  *gps.Provider
-	Parser   parser.Parser
-	Interval time.Duration
+	ID        string
+	Device    device.Device
+	GpsDevice *device.GpsDevice
+	Parser    parser.Parser
+	Interval  time.Duration
 
 	stop  chan struct{}
 	wg    sync.WaitGroup
-	last  model.GPSData
+	last  model.GpsData
 	gpsFn func()
 }
 
 // NewVehicle constructs a Vehicle with given identifiers, device paths and parser.
-// It will attempt to open the LoRa serial device; if GPSDev is provided a GPS provider is created.
+// It will attempt to open the LoRa serial device; if GpsDevice is provided a GPS device is created.
 func NewVehicle(id, loraDev string, loraBaud int, gpsDev string, gpsBaud int, interval time.Duration, p parser.Parser) *Vehicle {
 	dev, _ := device.NewSerialDevice(loraDev, loraBaud)
 	v := &Vehicle{ID: id, Device: dev, Parser: p, Interval: interval, stop: make(chan struct{})}
 	if gpsDev != "" {
-		v.GPSProv = gps.NewSerialProvider(gpsDev, gpsBaud)
+		v.GpsDevice = device.NewSerialGpsDevice(gpsDev, gpsBaud)
 	}
 	return v
 }
@@ -42,10 +39,11 @@ func NewVehicle(id, loraDev string, loraBaud int, gpsDev string, gpsBaud int, in
 // Start begins the GPS reader (if configured) and telemetry ticker goroutines.
 func (v *Vehicle) Start() error {
 	// start GPS provider if present
-	if v.GPSProv != nil {
-		ch := make(chan model.GPSData, 5)
-		stop, err := v.GPSProv.Start(ch)
+	if v.GpsDevice != nil {
+		ch := make(chan model.GpsData, 5)
+		stop, err := v.GpsDevice.Start(ch)
 		if err == nil {
+			log.Printf("vehicle %s: gps start: success", v.ID)
 			v.gpsFn = stop
 			v.wg.Add(1)
 			go func() {
@@ -100,10 +98,12 @@ func (v *Vehicle) sendTelemetry() {
 	if err != nil {
 		log.Printf("vehicle %s encode telemetry err: %v", v.ID, err)
 		return
+	} else {
+		log.Printf("vehicle %s encode telemetry: %s", v.ID, line)
 	}
 	if v.Device != nil {
 		if err := v.Device.WriteLine(line); err == nil {
-			log.Printf("[%s] sent telemetry", v.ID)
+			log.Printf("[%s] sent telemetry: %s", v.ID, line)
 		} else {
 			log.Printf("[%s] lora write err: %v", v.ID, err)
 		}

@@ -28,8 +28,8 @@ type ControlMessage struct {
 	Kd        float64 `json:"kd"`
 }
 
-// GPSData represents a simple latitude/longitude reading.
-type GPSData struct {
+// GpsData represents a simple latitude/longitude reading.
+type GpsData struct {
 	Lat float64 `json:"lat"`
 	Lon float64 `json:"lon"`
 }

@@ -13,14 +13,14 @@ type Config struct {
 // GlobalConfig defines shared defaults across the system.
 type GlobalConfig struct {
 	WireFormat string `yaml:"wire_format"` // default wire format (csv/json)
-	FogAddr    string `yaml:"fog_addr"`    // address for FogServer (e.g. ":10000")
+	FogAddr    string `yaml:"fog_addr"`    // address for FogServer (e.g. ":10000") if blank server will not work
 }
 
 // GatewayConfig defines configuration for a single gateway instance.
 type GatewayConfig struct {
 	ID       string   `yaml:"id"`
-	LoRaDev  string   `yaml:"lora_device"`
-	LoRaBaud int      `yaml:"lora_baud"`
+	LoraDev  string   `yaml:"lora_device"`
+	LoraBaud int      `yaml:"lora_baud"`
 	WireIn   string   `yaml:"wire_in"`  // format received from vehicle
 	WireOut  string   `yaml:"wire_out"` // format sent to fog
 	FogURL   string   `yaml:"fog_url"`  // fog server endpoint
@@ -30,10 +30,10 @@ type GatewayConfig struct {
 // VehicleConfig defines configuration for a single vehicle agent.
 type VehicleConfig struct {
 	ID                  string `yaml:"id"`
-	LoRaDev             string `yaml:"lora_device"`
-	LoRaBaud            int    `yaml:"lora_baud"`
-	GPSDev              string `yaml:"gps_device"`
-	GPSBaud             int    `yaml:"gps_baud"`
+	LoraDev             string `yaml:"lora_device"`
+	LoraBaud            int    `yaml:"lora_baud"`
+	GpsDev              string `yaml:"gps_device"`
+	GpsBaud             int    `yaml:"gps_baud"`
 	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms"`
 	WireFormat          string `yaml:"wire_format"`
 }

@@ -30,7 +30,9 @@ func NewGateway(id, devPath string, baud int, in parser.Parser, out parser.Parse
 	dev, err := device.NewSerialDevice(devPath, baud)
 	if err != nil {
 		// log but continue: user may run gateway without physical device (e.g., test)
-		log.Printf("gateway %s: open serial failed: %v", id, err)
+		log.Printf("gateway %s open serial %s err: %v", id, devPath, err)
+	} else {
+		log.Printf("gateway %s open serial %s: success", id, devPath)
 	}
 	return &Gateway{
 		ID:        id,
@@ -78,14 +80,18 @@ func (g *Gateway) loop() {
 		// Decode input using InParser
 		vd, err := g.InParser.DecodeTelemetry(line)
 		if err != nil {
-			log.Printf("gateway %s decode err: %v (%s)", g.ID, err, line)
+			log.Printf("gateway %s decode err: %v", g.ID, err)
 			continue
+		} else {
+			log.Printf("gateway %s decode: %s", g.ID, line)
 		}
 		// Encode for Fog using OutParser
 		out, err := g.OutParser.EncodeTelemetry(vd)
 		if err != nil {
 			log.Printf("gateway %s encode err: %v", g.ID, err)
 			continue
+		} else {
+			log.Printf("gateway %s encode: %s", g.ID, out)
 		}
 
 		// send to Fog server
@@ -93,6 +99,8 @@ func (g *Gateway) loop() {
 		if err != nil {
 			log.Printf("gateway %s forward err: %v", g.ID, err)
 			continue
+		} else {
+			log.Printf("gateway %s forward: %s", g.ID, out)
 		}
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 			log.Printf("warning: failed to discard response body: %v", err)

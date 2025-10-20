@@ -25,6 +25,19 @@ func NewSerialDevice(dev string, baud int) (*SerialDevice, error) {
 	return &SerialDevice{port: p, r: bufio.NewReader(p)}, nil
 }
 
+// Open serial port for tranferring data
+func (s *SerialDevice) Open() error {
+	return nil
+}
+
+// Close closes the underlying serial port.
+func (s *SerialDevice) Close() error {
+	if s.port == nil {
+		return nil
+	}
+	return s.port.Close()
+}
+
 // ReadLine reads a single line from the serial port with optional timeout.
 func (s *SerialDevice) ReadLine(timeout time.Duration) (string, error) {
 	ch := make(chan struct {
@@ -58,12 +71,4 @@ func (s *SerialDevice) ReadLine(timeout time.Duration) (string, error) {
 func (s *SerialDevice) WriteLine(line string) error {
 	_, err := s.port.Write(append([]byte(line), '\n'))
 	return err
-}
-
-// Close closes the underlying serial port.
-func (s *SerialDevice) Close() error {
-	if s.port == nil {
-		return nil
-	}
-	return s.port.Close()
 }
