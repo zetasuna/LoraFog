@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	device := flag.String("device", "/tmp/ttyV0", "serial device to write telemetry into")
+	device := flag.String("device", "/tmp/ttyGPSS1", "serial device to write telemetry into")
 	baud := flag.Int("baud", 9600, "baud rate")
 	flag.Parse()
 	port, err := serial.Open(*device, &serial.Mode{BaudRate: *baud})

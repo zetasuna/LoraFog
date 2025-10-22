@@ -1,40 +1,73 @@
 global:
   wire_format: "csv"
+
+server:
   fog_addr: ":10000"
+  app_addr: "http://127.0.0.1:3001"
+  gateway_registry:
+    - id: "GW01"
+      url: "http://127.0.0.1:10000"
+      vehicles: ["V01"]
+    - id: "GW02"
+      url: "http://127.0.0.1:10000"
+      vehicles: ["V02"]
 
 gateways:
   - id: "GW01"
-    lora_device: "/tmp/ttyV1"
-    lora_baud: 9600
-    vehicles: ["V01"]
+    url: "http://127.0.0.1:10001"
+    fog_url: "http://127.0.0.1:10000"
     wire_in: "csv" # format nhận từ vehicle
     wire_out: "json" # format gửi lên fog
-    fog_url: "http://127.0.0.1:10000"
-  - id: "GW02"
-    lora_device: "/tmp/ttyV2"
+    lora_device: "/tmp/ttyGW1"
     lora_baud: 9600
-    vehicles: ["V02"]
+    vehicles: ["00001"]
+  - id: "GW02"
+    url: "http://127.0.0.1:10002"
+    fog_url: "http://127.0.0.1:10000"
     wire_in: "csv" # format nhận từ vehicle
     wire_out: "csv" # format gửi lên fog
-    fog_url: "http://127.0.0.1:10000"
+    lora_device: "/tmp/ttyGW2"
+    lora_baud: 9600
+    vehicles: ["00002"]
 
 vehicles:
-  - id: "V01"
-    lora_device: "/tmp/ttyV11"
-    lora_baud: 9600
-    gps_device: "/tmp/ttyV12"
-    gps_baud: 9600
-    telemetry_interval_ms: 2000
+  - id: "00001"
     wire_format: "csv"
-  - id: "V02"
-    lora_device: "/tmp/ttyV21"
+    telemetry_interval_ms: -1
+    lora_device: "/tmp/ttyLR1"
     lora_baud: 9600
-    gps_device: "/tmp/ttyV22"
+    gps_id: "GPS01"
+    gps_device: "/tmp/ttyGPSR1"
     gps_baud: 9600
-    telemetry_interval_ms: 4000
+  - id: "00002"
     wire_format: "csv"
+    telemetry_interval_ms: -1
+    lora_device: "/tmp/ttyLR2"
+    lora_baud: 9600
+    gps_id: "GPS02"
+    gps_device: "/tmp/ttyGPSR2"
+    gps_baud: 9600
 
-gps:
+gpses:
   - id: "GPS01"
-    gps_device: "/tmp/ttyV0"
-    gps_baud: 9600
+    device: "/tmp/ttyGPSS1"
+    baud: 9600
+  - id: "GPS02"
+    device: "/tmp/ttyGPSS2"
+    baud: 9600
+
+virtual_serials:
+  enabled: true
+  pairs:
+    - type: "gateway-vehicle"
+      left: "/tmp/ttyGW1"
+      right: "/tmp/ttyLR1"
+    - type: "gateway-vehicle"
+      left: "/tmp/ttyGW2"
+      right: "/tmp/ttyLR2"
+    - type: "gps-vehicle"
+      left: "/tmp/ttyGPSS1"
+      right: "/tmp/ttyGPSR1"
+    - type: "gps-vehicle"
+      left: "/tmp/ttyGPSS2"
+      right: "/tmp/ttyGPSR2"

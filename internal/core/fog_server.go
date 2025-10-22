@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -22,10 +23,12 @@ var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { retu
 // broadcasts telemetry to websocket clients, and forwards control messages to gateways.
 type FogServer struct {
 	Addr    string
+	AppAddr string
 	reg     *registry
 	clients map[*websocket.Conn]bool
 	mu      sync.Mutex
 	server  *http.Server
+	wireFmt string // wire format: "csv" or "json"
 }
 
 // registry maps vehicle IDs to gateway URLs.
@@ -51,8 +54,13 @@ func (r *registry) get(v string) (string, bool) {
 }
 
 // NewFogServer constructs a FogServer listening on addr.
-func NewFogServer(addr string) *FogServer {
-	return &FogServer{Addr: addr, reg: newRegistry(), clients: map[*websocket.Conn]bool{}}
+func NewFogServer(addr string, appAddr string) *FogServer {
+	return &FogServer{
+		Addr:    addr,
+		AppAddr: appAddr,
+		reg:     newRegistry(),
+		clients: map[*websocket.Conn]bool{},
+	}
 }
 
 // RegisterGateway registers a gateway and maps its vehicle list in the registry.
@@ -64,16 +72,22 @@ func (f *FogServer) RegisterGateway(id, url string, vehicles []string) {
 
 // Start launches the HTTP server for telemetry, ws and control endpoints.
 // This call blocks until the server stops or fails.
-func (f *FogServer) Start() {
+func (f *FogServer) Start() error {
+	if f.Addr == "" {
+		log.Println("[fog] fog server not started (empty address)")
+		return nil
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/telemetry", f.handleTelemetry)
+	mux.HandleFunc("/api/control", f.handleControl)
 	mux.HandleFunc("/ws", f.handleWS)
-	mux.HandleFunc("/control", f.handleControl)
 	f.server = &http.Server{Addr: f.Addr, Handler: mux}
-	log.Printf("FogServer is listening on %s", f.Addr)
-	if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+	log.Printf("[fog] listening on %s", f.Addr)
+	return f.server.ListenAndServe()
+	// log.Printf("FogServer is listening on %s", f.Addr)
+	// if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// 	log.Fatal(err)
+	// }
 }
 
 // Stop shuts down the HTTP server.
@@ -86,21 +100,85 @@ func (f *FogServer) Stop() {
 // handleTelemetry accepts telemetry posted by gateways in either JSON or CSV text.
 // It decodes to VehicleData and broadcasts CSV lines to websocket clients.
 func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	line := string(body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	defer func() {
+		if cerr := r.Body.Close(); cerr != nil {
+			log.Printf("[fog] warning: failed to close request body: %v", cerr)
+		}
+	}()
+
+	line := strings.TrimSpace(string(body))
+	if line == "" {
+		http.Error(w, "empty telemetry", http.StatusBadRequest)
+		return
+	}
+
 	var vd model.VehicleData
+	// Try decode as JSON first
 	if err := json.Unmarshal(body, &vd); err != nil {
+		// Try CSV fallback
 		csvp := parser.NewCSVParser()
 		vd2, err2 := csvp.DecodeTelemetry(line)
 		if err2 != nil {
-			http.Error(w, "invalid telemetry", 400)
+			log.Printf("[fog] invalid telemetry: cannot decode JSON or CSV: %v", err2)
+			http.Error(w, "invalid telemetry", http.StatusBadRequest)
 			return
 		}
 		vd = vd2
 	}
-	csv, _ := parser.NewCSVParser().EncodeTelemetry(vd)
-	f.broadcast(csv)
-	w.WriteHeader(200)
+
+	// Encode to broadcast format
+	var out string
+	var contentType string
+	switch f.wireFmt {
+	case "json":
+		contentType = "application/json"
+		b, err := json.Marshal(vd)
+		if err != nil {
+			log.Printf("[fog] encode json err: %v", err)
+			http.Error(w, "encode error", http.StatusInternalServerError)
+			return
+		}
+		out = string(b)
+	default: // csv (default)
+		contentType = "text/plain"
+		csvp := parser.NewCSVParser()
+		out, err = csvp.EncodeTelemetry(vd)
+		if err != nil {
+			log.Printf("[fog] encode csv err: %v", err)
+			http.Error(w, "encode error", http.StatusInternalServerError)
+			return
+		}
+	}
+	f.broadcast(out)
+	log.Printf("[fog] broadcast %s telemetry: %s", strings.ToUpper(f.wireFmt), out)
+
+	// Forward to App Server if enabled
+	if f.AppAddr != "" {
+		go func(v model.VehicleData) {
+			b, _ := json.Marshal(v)
+			resp, err := http.Post(f.AppAddr+"/api/telemetry", contentType, bytes.NewReader(b))
+			if err != nil {
+				log.Printf("[fog] forward to app failed: %v", err)
+				return
+			}
+			defer func() {
+				if cerr := resp.Body.Close(); cerr != nil {
+					log.Printf("[fog] warning: close app response: %v", cerr)
+				}
+			}()
+			// Discard the body to complete the HTTP exchange cleanly
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				log.Printf("[fog] warning: discard control response: %v", err)
+			}
+			log.Printf("[fog] forwarded telemetry to app (%s): %s", f.AppAddr, v.VehicleID)
+		}(vd)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // handleWS upgrades HTTP to websocket and registers the client for broadcasts.
@@ -139,35 +217,101 @@ func (f *FogServer) broadcast(msg string) {
 	}
 }
 
-// handleControl accepts a structured ControlMessage and forwards it to the gateway that serves the target vehicle.
-// The fog forwards the control as JSON to the gateway's /command endpoint.
+// handleControl receives a control message from the cloud or admin,
+// finds the gateway responsible for the target vehicle, and forwards
+// the message in the format specified by the global wire_format.
 func (f *FogServer) handleControl(w http.ResponseWriter, r *http.Request) {
-	var c model.ControlMessage
-	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	url, ok := f.reg.get(c.VehicleID)
-	if !ok {
-		http.Error(w, "no gateway for vehicle", 404)
-		return
-	}
-	b, _ := json.Marshal(c)
-	// go http.Post(url+"/command", "application/json", bytes.NewReader(b))
-	go func() {
-		resp, err := http.Post(url+"/command", "application/json", bytes.NewReader(b))
-		if err != nil {
-			log.Printf("failed to send control to %s: %v", url, err)
-			return
-		}
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				log.Printf("warning: close control response: %v", cerr)
-			}
-		}()
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			log.Printf("warning: discard control response: %v", err)
+	// Always close request body safely
+	defer func() {
+		if cerr := r.Body.Close(); cerr != nil {
+			log.Printf("[fog] warning: close control request body: %v", cerr)
 		}
 	}()
-	w.WriteHeader(202)
+
+	// Decode control message (JSON input only for API)
+	body, berr := io.ReadAll(r.Body)
+	if berr != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	line := strings.TrimSpace(string(body))
+	if line == "" {
+		http.Error(w, "empty control message", http.StatusBadRequest)
+		return
+	}
+
+	// Step 1: decode incoming control message (Fog → Gateway)
+	var ctl model.ControlMessage
+	// Try JSON first
+	if err := json.Unmarshal(body, &ctl); err != nil {
+		// Try CSV fallback
+		csvp := parser.NewCSVParser()
+		ctl2, err2 := csvp.DecodeControl(line)
+		if err2 != nil {
+			http.Error(w, "invalid control message format", http.StatusBadRequest)
+			// log.Printf("[gateway %s] invalid control: %v", g.ID, err2)
+			return
+		}
+		ctl = ctl2
+	}
+
+	// Lookup gateway by vehicle ID
+	url, ok := f.reg.get(ctl.VehicleID)
+	if !ok {
+		http.Error(w, "no gateway registered for vehicle", http.StatusNotFound)
+		log.Printf("[fog] control ignored: no gateway for vehicle %s", ctl.VehicleID)
+		return
+	}
+
+	// Encode control message according to configured wire format
+	var payload []byte
+	var contentType string
+	var err error
+
+	switch f.wireFmt {
+	case "csv":
+		csvp := parser.NewCSVParser()
+		line, encErr := csvp.EncodeControl(ctl)
+		if encErr != nil {
+			http.Error(w, "failed to encode control message (csv)", http.StatusInternalServerError)
+			log.Printf("[fog] control encode csv error: %v", encErr)
+			return
+		}
+		payload = []byte(line)
+		contentType = "text/plain"
+
+	default: // json
+		payload, err = json.Marshal(ctl)
+		if err != nil {
+			http.Error(w, "failed to encode control message (json)", http.StatusInternalServerError)
+			log.Printf("[fog] control encode json error: %v", err)
+			return
+		}
+		contentType = "application/json"
+	}
+
+	// Send asynchronously to the gateway
+	go func() {
+		resp, err := http.Post(url+"/command", contentType, bytes.NewReader(payload))
+		if err != nil {
+			log.Printf("[fog] failed to send control to gateway %s: %v", url, err)
+			return
+		}
+
+		// Always close response body safely
+		defer func() {
+			if cerr := resp.Body.Close(); cerr != nil {
+				log.Printf("[fog] warning: close control response: %v", cerr)
+			}
+		}()
+
+		// Discard the body to complete the HTTP exchange cleanly
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			log.Printf("[fog] warning: discard control response: %v", err)
+		}
+
+		log.Printf("[fog] control forwarded to %s (fmt=%s, vehicle=%s)", url, f.wireFmt, ctl.VehicleID)
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
 }

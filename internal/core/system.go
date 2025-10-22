@@ -3,10 +3,13 @@
 package core
 
 import (
+	"LoraFog/internal/device"
 	"LoraFog/internal/model"
 	"LoraFog/internal/parser"
+	"LoraFog/internal/util"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,10 +22,14 @@ type System struct {
 	cfgPath  string
 	cfg      *model.Config
 	parsers  map[string]parser.Parser
+	Fog      *FogServer
 	Gateways []*Gateway
 	Vehicles []*Vehicle
-	Fog      *FogServer
+	Gpses    []*device.GpsDevice
+	SocatMgr *util.SocatManager
 
+	stop      chan struct{}
+	wg        sync.WaitGroup
 	started   bool
 	startLock sync.Mutex
 }
@@ -45,16 +52,34 @@ func NewSystem(cfgPath string) (*System, error) {
 		parsers: make(map[string]parser.Parser),
 	}
 
+	// Virtual Serial Setup
+	virtMgr := util.NewSocatManager()
+	s.SocatMgr = virtMgr
+	for _, pair := range cfg.VirtualSerials.Pairs {
+		if err := virtMgr.CreatePair(pair.Left, pair.Right); err != nil {
+			log.Printf("[virt-serial] failed to create pair: %v", err)
+		}
+	}
+	time.Sleep(2 * time.Second)
+
 	// register parser formats
 	s.parsers["csv"] = parser.NewCSVParser()
 	s.parsers["json"] = parser.NewJSONParser()
 
-	// construct FogServer with configured address or default
-	fogAddr := cfg.Global.FogAddr
-	if fogAddr == "" {
-		fogAddr = ":10000"
+	// construct FogServer from config
+	if cfg.Server.FogAddr != "" {
+		// s.Fog = NewFogServer(cfg.Server.FogAddr)
+		s.Fog = NewFogServer(cfg.Server.FogAddr, cfg.Server.AppAddr)
+		s.Fog.wireFmt = strings.ToLower(cfg.Global.WireFormat)
+
+		for _, gw := range cfg.Server.Gateways {
+			s.Fog.RegisterGateway(gw.ID, gw.URL, gw.Vehicles)
+			log.Printf("[config] Registered gateway %s (%s) vehicles=%v",
+				gw.ID, gw.URL, gw.Vehicles)
+		}
+	} else {
+		log.Println("[config] Fog server disabled (no fog_addr configured)")
 	}
-	s.Fog = NewFogServer(fogAddr)
 
 	// construct gateways from config
 	for _, gcfg := range cfg.Gateways {
@@ -70,9 +95,12 @@ func NewSystem(cfgPath string) (*System, error) {
 			gcfg.ID,
 			gcfg.LoraDev,
 			gcfg.LoraBaud,
+			gcfg.URL,
+			gcfg.FogURL,
+			gcfg.WireIn,
+			gcfg.WireOut,
 			s.parsers[inFmt],
 			s.parsers[outFmt],
-			gcfg.FogURL,
 			gcfg.Vehicles,
 		)
 		s.Gateways = append(s.Gateways, gw)
@@ -89,12 +117,19 @@ func NewSystem(cfgPath string) (*System, error) {
 			vcfg.ID,
 			vcfg.LoraDev,
 			vcfg.LoraBaud,
+			vcfg.ID,
 			vcfg.GpsDev,
 			vcfg.GpsBaud,
 			time.Duration(vcfg.TelemetryIntervalMs)*time.Millisecond,
 			p,
 		)
 		s.Vehicles = append(s.Vehicles, veh)
+	}
+
+	// construct gps devices from config
+	for _, gpscfg := range cfg.Gpses {
+		gps := device.NewGpsDevice(gpscfg.ID, gpscfg.Dev, gpscfg.Baud)
+		s.Gpses = append(s.Gpses, gps)
 	}
 	return s, nil
 }
@@ -107,28 +142,60 @@ func (s *System) StartAll() error {
 	if s.started {
 		return nil
 	}
-	// start fog server in background
-	go s.Fog.Start()
+	s.started = true
+	s.stop = make(chan struct{})
+
+	// start fog server
+	// go s.Fog.Start()
+	if s.Fog != nil {
+		log.Printf("[system] Starting fog server at %s ...", s.Fog.Addr)
+		go func() {
+			if err := s.Fog.Start(); err != nil {
+				log.Printf("[system] Fog server error: %v", err)
+			}
+		}()
+	} else {
+		log.Println("[system] Fog server is disabled; skipping startup")
+	}
 
 	// start gateways and register them to fog registry
 	for _, g := range s.Gateways {
 		if err := g.Start(); err != nil {
-			log.Printf("gateway %s start err: %v", g.ID, err)
+			log.Printf("[gateway %s] start err: %v", g.ID, err)
 		} else {
-			log.Printf("gateway %s start: Success", g.ID)
-			s.Fog.RegisterGateway(g.ID, g.FogURL, g.Vehicles)
+			log.Printf("[gateway %s] start: Success", g.ID)
+			// s.Fog.RegisterGateway(g.ID, g.FogURL, g.Vehicles)
 		}
 	}
 
 	// start vehicle agents
 	for _, v := range s.Vehicles {
 		if err := v.Start(); err != nil {
-			log.Printf("vehicle %s start err: %v", v.ID, err)
+			log.Printf("[vehicle %s] start err: %v", v.ID, err)
 		} else {
-			log.Printf("vehicle %s start: Success", v.ID)
+			log.Printf("[vehicle %s] start: Success", v.ID)
 		}
 	}
-	s.started = true
+
+	// start gps simulation
+	for _, gps := range s.Gpses {
+		s.wg.Add(1)
+		go func(gps *device.GpsDevice) {
+			defer s.wg.Done()
+			log.Printf("[system] starting GPS %s device %s (baud %d)", gps.ID, gps.Device, gps.Baud)
+			stop := make(chan struct{})
+			go func() {
+				<-s.stop
+				close(stop)
+			}()
+
+			if err := gps.Simulate(stop); err != nil {
+				log.Printf("[gps %s] simulate failed: %v", gps.ID, err)
+			} else {
+				log.Printf("[gps %s] simulation stopped", gps.ID)
+			}
+		}(gps)
+	}
 	return nil
 }
 
@@ -145,6 +212,13 @@ func (s *System) StopAll() {
 	for _, g := range s.Gateways {
 		g.Stop()
 	}
+	if s.SocatMgr != nil {
+		s.SocatMgr.Cleanup()
+	}
 	s.Fog.Stop()
+	log.Println("[system] stopping all components...")
+	close(s.stop)
+	s.wg.Wait()
 	s.started = false
+	log.Println("[system] all components stopped.")
 }

@@ -19,59 +19,86 @@ type Vehicle struct {
 	Parser    parser.Parser
 	Interval  time.Duration
 
-	stop  chan struct{}
-	wg    sync.WaitGroup
-	last  model.GpsData
-	gpsFn func()
+	stop       chan struct{}
+	wg         sync.WaitGroup
+	last       model.GpsData
+	lastUpdate time.Time
+	gpsFn      func()
 }
 
 // NewVehicle constructs a Vehicle with given identifiers, device paths and parser.
 // It will attempt to open the LoRa serial device; if GpsDevice is provided a GPS device is created.
-func NewVehicle(id, loraDev string, loraBaud int, gpsDev string, gpsBaud int, interval time.Duration, p parser.Parser) *Vehicle {
+func NewVehicle(id, loraDev string, loraBaud int, gpsID string, gpsDev string, gpsBaud int, interval time.Duration, p parser.Parser) *Vehicle {
 	dev, _ := device.NewSerialDevice(loraDev, loraBaud)
 	v := &Vehicle{ID: id, Device: dev, Parser: p, Interval: interval, stop: make(chan struct{})}
 	if gpsDev != "" {
-		v.GpsDevice = device.NewSerialGpsDevice(gpsDev, gpsBaud)
+		v.GpsDevice = device.NewGpsDevice(gpsID, gpsDev, gpsBaud)
 	}
 	return v
 }
 
-// Start begins the GPS reader (if configured) and telemetry ticker goroutines.
+// Start initializes the vehicle data acquisition and telemetry loop.
+// It starts reading GPS data and immediately sends telemetry upon new data arrival.
+// Optionally, it may still include a periodic heartbeat if needed.
 func (v *Vehicle) Start() error {
-	// start GPS provider if present
+	// Start GPS reader if available
 	if v.GpsDevice != nil {
 		ch := make(chan model.GpsData, 5)
+
+		// Start reading GPS asynchronously
 		stop, err := v.GpsDevice.Read(ch)
-		if err == nil {
-			log.Printf("vehicle %s: gps start: success", v.ID)
+		if err != nil {
+			log.Printf("[vehicle %s] gps start err: %v", v.ID, err)
+		} else {
+			log.Printf("[vehicle %s] gps start: success", v.ID)
 			v.gpsFn = stop
 			v.wg.Add(1)
 			go func() {
 				defer v.wg.Done()
-				for g := range ch {
-					v.last = g
+				for {
+					select {
+					case <-v.stop:
+						log.Printf("[vehicle %s] stopping GPS loop", v.ID)
+						return
+					case g, ok := <-ch:
+						if !ok {
+							log.Printf("[vehicle %s] gps channel closed", v.ID)
+							return
+						}
+						// Update last GPS reading
+						v.last = g
+						v.lastUpdate = time.Now()
+						// Immediately send telemetry when new GPS data arrives
+						v.sendTelemetry()
+					}
 				}
 			}()
-		} else {
-			log.Printf("vehicle %s: gps start err: %v", v.ID, err)
 		}
 	}
 
-	// periodic telemetry sender
-	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		ticker := time.NewTicker(v.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-v.stop:
-				return
-			case <-ticker.C:
-				v.sendTelemetry()
+	// (Optional) heartbeat ticker – useful if you still want periodic "alive" message
+	if v.Interval > 0 {
+		v.wg.Add(1)
+		go func() {
+			defer v.wg.Done()
+			ticker := time.NewTicker(v.Interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-v.stop:
+					log.Printf("[vehicle %s] stopping heartbeat", v.ID)
+					return
+				case <-ticker.C:
+					// Only send heartbeat if no GPS data for a while
+					if time.Since(v.lastUpdate) > v.Interval {
+						log.Printf("[vehicle %s] sending heartbeat", v.ID)
+						v.sendTelemetry()
+					}
+				}
 			}
-		}
-	}()
+		}()
+	}
+
 	return nil
 }
 
@@ -96,19 +123,19 @@ func (v *Vehicle) sendTelemetry() {
 	}
 	line, err := v.Parser.EncodeTelemetry(vd)
 	if err != nil {
-		log.Printf("vehicle %s encode telemetry err: %v", v.ID, err)
+		log.Printf("[vehicle %s] encode telemetry err: %v", v.ID, err)
 		return
 	} else {
-		log.Printf("vehicle %s encode telemetry: %s", v.ID, line)
+		log.Printf("[vehicle %s] encode telemetry: %s", v.ID, line)
 	}
 	if v.Device != nil {
 		if err := v.Device.WriteLine(line); err == nil {
-			log.Printf("[%s] sent telemetry: %s", v.ID, line)
+			log.Printf("[vehicle %s] sent telemetry: %s", v.ID, line)
 		} else {
-			log.Printf("[%s] lora write err: %v", v.ID, err)
+			log.Printf("[vehicle %s] lora write err: %v", v.ID, err)
 		}
 	} else {
-		log.Printf("[%s] device absent; telemetry not sent", v.ID)
+		log.Printf("[vehicle %s] device absent; telemetry not sent", v.ID)
 	}
 }
 
