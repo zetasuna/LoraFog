@@ -133,17 +133,18 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	// Encode to broadcast format
 	var out string
+	var payload []byte
 	var contentType string
 	switch f.wireFmt {
 	case "json":
 		contentType = "application/json"
-		b, err := json.Marshal(vd)
+		payload, err = json.Marshal(vd)
 		if err != nil {
 			log.Printf("[fog] encode json err: %v", err)
 			http.Error(w, "encode error", http.StatusInternalServerError)
 			return
 		}
-		out = string(b)
+		out = string(payload)
 	default: // csv (default)
 		contentType = "text/plain"
 		csvp := parser.NewCSVParser()
@@ -153,6 +154,7 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "encode error", http.StatusInternalServerError)
 			return
 		}
+		payload = []byte(out)
 	}
 	f.broadcast(out)
 	log.Printf("[fog] broadcast %s telemetry: %s", strings.ToUpper(f.wireFmt), out)
@@ -160,8 +162,7 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	// Forward to App Server if enabled
 	if f.AppAddr != "" {
 		go func(v model.VehicleData) {
-			b, _ := json.Marshal(v)
-			resp, err := http.Post(f.AppAddr+"/api/telemetry", contentType, bytes.NewReader(b))
+			resp, err := http.Post(f.AppAddr+"/api/telemetry", contentType, bytes.NewReader(payload))
 			if err != nil {
 				log.Printf("[fog] forward to app failed: %v", err)
 				return

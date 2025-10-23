@@ -1,0 +1,26 @@
+# PlatformIO build system
+.pio/
+.cache/
+
+# PlatformIO IDE / VSCode / Neovim
+.vscode/
+.idea/
+.clangd/
+compile_commands.json
+
+# Logs, temp files
+*.log
+*.tmp
+
+# macOS/Linux system files
+.DS_Store
+Thumbs.db
+
+# Arduino artifacts (nếu build bằng Arduino IDE)
+*.hex
+*.elf
+
+# Backup or swap files
+*~
+*.swp
+

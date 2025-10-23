@@ -189,7 +189,7 @@ func (s *System) StartAll() error {
 				close(stop)
 			}()
 
-			if err := gps.Simulate(stop); err != nil {
+			if err := gps.StartSimulation(stop); err != nil {
 				log.Printf("[gps %s] simulate failed: %v", gps.ID, err)
 			} else {
 				log.Printf("[gps %s] simulation stopped", gps.ID)

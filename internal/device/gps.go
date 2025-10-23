@@ -4,7 +4,7 @@ package device
 
 import (
 	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
+	"LoraFog/internal/util"
 	"errors"
 	"fmt"
 	"log"
@@ -104,8 +104,8 @@ func (g *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
 			if len(parts) < 6 {
 				continue
 			}
-			lat, err1 := parser.ParseNMEACoord(parts[2], parts[3])
-			lon, err2 := parser.ParseNMEACoord(parts[4], parts[5])
+			lat, err1 := util.ParseNMEACoord(parts[2], parts[3])
+			lon, err2 := util.ParseNMEACoord(parts[4], parts[5])
 			if err1 != nil || err2 != nil {
 				continue
 			}
@@ -117,8 +117,8 @@ func (g *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
 
 // --- Implementation of Simulatable interface ---
 
-// Simulate continuously writes fake GPS NMEA sentences to the port until stop is closed.
-func (g *GpsDevice) Simulate(stop <-chan struct{}) error {
+// StartSimulation continuously writes fake GPS NMEA sentences to the port until stop is closed.
+func (g *GpsDevice) StartSimulation(stop <-chan struct{}) error {
 	if err := g.Open(); err != nil {
 		return err
 	}
@@ -140,8 +140,8 @@ func (g *GpsDevice) Simulate(stop <-chan struct{}) error {
 
 		lat := 21.0285 + (rand.Float64()-0.5)*0.001
 		lon := 105.8048 + (rand.Float64()-0.5)*0.001
-		latStr, latDir := parser.ToNMEACoord(lat, true)
-		lonStr, lonDir := parser.ToNMEACoord(lon, false)
+		latStr, latDir := util.ToNMEACoord(lat, true)
+		lonStr, lonDir := util.ToNMEACoord(lon, false)
 		timeUTC := time.Now().UTC().Format("150405.00")
 
 		nmea := fmt.Sprintf("$GPGGA,%s,%s,%s,%s,%s,1,08,0.9,10.0,M,0.0,M,,*47\r\n",

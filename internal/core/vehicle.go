@@ -102,6 +102,24 @@ func (v *Vehicle) Start() error {
 	return nil
 }
 
+// Stop stops the vehicle goroutines, GPS provider and closes the device.
+func (v *Vehicle) Stop() {
+	// close stop channel (idempotent)
+	select {
+	case <-v.stop:
+		// already closed
+	default:
+		close(v.stop)
+	}
+	if v.gpsFn != nil {
+		v.gpsFn()
+	}
+	if v.Device != nil {
+		_ = v.Device.Close()
+	}
+	v.wg.Wait()
+}
+
 // sendTelemetry builds a VehicleData from last GPS/fallback values and writes it to the Device.
 func (v *Vehicle) sendTelemetry() {
 	lat, lon := v.last.Lat, v.last.Lon
@@ -117,8 +135,8 @@ func (v *Vehicle) sendTelemetry() {
 		Lon:       lon,
 		HeadCur:   headCur,
 		HeadTar:   headTar,
-		LeftSpd:   12.0,
-		RightSpd:  12.0,
+		LeftSpd:   100,
+		RightSpd:  100,
 		PID:       1.0,
 	}
 	line, err := v.Parser.EncodeTelemetry(vd)
@@ -137,22 +155,4 @@ func (v *Vehicle) sendTelemetry() {
 	} else {
 		log.Printf("[vehicle %s] device absent; telemetry not sent", v.ID)
 	}
-}
-
-// Stop stops the vehicle goroutines, GPS provider and closes the device.
-func (v *Vehicle) Stop() {
-	// close stop channel (idempotent)
-	select {
-	case <-v.stop:
-		// already closed
-	default:
-		close(v.stop)
-	}
-	if v.gpsFn != nil {
-		v.gpsFn()
-	}
-	if v.Device != nil {
-		_ = v.Device.Close()
-	}
-	v.wg.Wait()
 }

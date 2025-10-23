@@ -27,5 +27,5 @@ type Device interface {
 type Simulatable interface {
 	Device
 	// Simulate generates mock output continuously until stop is closed.
-	Simulate(stop <-chan struct{}) error
+	StartSimulation(stop <-chan struct{}) error
 }

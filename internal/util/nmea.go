@@ -1,6 +1,6 @@
-// Package parser provides NMEA coordinate conversion utilities for GPS data.
+// Package util provides NMEA coordinate conversion utilities for GPS data.
 // It supports parsing from ddmm.mmmm format and conversion to decimal degrees.
-package parser
+package util
 
 import (
 	"fmt"
