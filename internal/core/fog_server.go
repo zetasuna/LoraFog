@@ -4,15 +4,18 @@
 package core
 
 import (
-	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"LoraFog/internal/model"
+	"LoraFog/internal/parser"
 
 	"github.com/gorilla/websocket"
 )
@@ -81,8 +84,11 @@ func (f *FogServer) Start() error {
 	mux.HandleFunc("/api/telemetry", f.handleTelemetry)
 	mux.HandleFunc("/api/control", f.handleControl)
 	mux.HandleFunc("/ws", f.handleWS)
-	f.server = &http.Server{Addr: f.Addr, Handler: mux}
-	log.Printf("[fog] listening on %s", f.Addr)
+	addr := f.Addr
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+	f.server = &http.Server{Addr: addr, Handler: mux}
+	log.Printf("[fog] listening on %s", addr)
 	return f.server.ListenAndServe()
 	// log.Printf("FogServer is listening on %s", f.Addr)
 	// if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -93,7 +99,14 @@ func (f *FogServer) Start() error {
 // Stop shuts down the HTTP server.
 func (f *FogServer) Stop() {
 	if f.server != nil {
-		_ = f.server.Close()
+		log.Println("[fog] Shutting down web server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := f.server.Shutdown(ctx); err != nil {
+			log.Printf("[fog] HTTP server shutdown error: %v", err)
+		} else {
+			log.Println("[fog] Web server stopped cleanly")
+		}
 	}
 }
 

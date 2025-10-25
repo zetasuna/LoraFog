@@ -4,13 +4,14 @@
 package main
 
 import (
-	"LoraFog/internal/core"
-	"LoraFog/internal/util"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"LoraFog/internal/core"
+	"LoraFog/internal/util"
 )
 
 // main is the single entrypoint for the LoraFog application.
@@ -36,6 +37,16 @@ func main() {
 		log.Fatalf("failed to start system: %v", err)
 	}
 
+	// app, err := app.NewApp()
+	// if err != nil {
+	// 	log.Fatalf("[Main] failed to initialize web app: %v", err)
+	// }
+	// go func() {
+	// 	if err := app.Start(sys.Fog.AppAddr); err != nil {
+	// 		log.Printf("[App] Failed to start web server: %v", err)
+	// 	}
+	// }()
+
 	// wait for Ctrl+C or SIGTERM
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -43,5 +54,6 @@ func main() {
 
 	log.Println("[Main] Shutting down system...")
 	sys.StopAll()
+	// app.Stop()
 	log.Println("[Main] System stopped cleanly.")
 }

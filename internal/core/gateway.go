@@ -1,9 +1,6 @@
 package core
 
 import (
-	"LoraFog/internal/device"
-	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
 	"context"
 	"encoding/json"
 	"io"
@@ -12,6 +9,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"LoraFog/internal/device"
+	"LoraFog/internal/model"
+	"LoraFog/internal/parser"
 )
 
 // Gateway represents a LoRa gateway instance that reads wire lines from a Device,
@@ -76,13 +77,16 @@ func (g *Gateway) Start() error {
 	// Start downlink HTTP handler (Fog → Vehicle)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/command", g.handleControl)
-	port := g.URL[strings.LastIndex(g.URL, ":"):]
-	g.server = &http.Server{Addr: port, Handler: mux}
+	// port := g.URL[strings.LastIndex(g.URL, ":"):]
+	addr := g.URL
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+	g.server = &http.Server{Addr: addr, Handler: mux}
 
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		log.Printf("[gateway %s] HTTP listening at %s/command", g.ID, g.URL)
+		log.Printf("[gateway %s] HTTP listening at %s/command", g.ID, addr)
 		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[gateway %s] HTTP error: %v", g.ID, err)
 		}
@@ -242,10 +246,13 @@ func (g *Gateway) Stop() {
 
 	// Stop HTTP server
 	if g.server != nil {
+		log.Printf("[gateway %s] Shutting down web server...", g.ID)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := g.server.Shutdown(ctx); err != nil {
-			log.Printf("[gateway %s] HTTP shutdown err: %v", g.ID, err)
+			log.Printf("[gateway %s] HTTP server shutdown error: %v", g.ID, err)
+		} else {
+			log.Printf("[gateway %s] Web server stopped cleanly", g.ID)
 		}
 	}
 

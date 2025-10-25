@@ -3,15 +3,16 @@
 package core
 
 import (
-	"LoraFog/internal/device"
-	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
-	"LoraFog/internal/util"
 	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"LoraFog/internal/device"
+	"LoraFog/internal/model"
+	"LoraFog/internal/parser"
+	"LoraFog/internal/util"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,7 +26,7 @@ type System struct {
 	Fog      *FogServer
 	Gateways []*Gateway
 	Vehicles []*Vehicle
-	Gpses    []*device.GpsDevice
+	Arduinos []*device.ArduinoDevice
 	SocatMgr *util.SocatManager
 
 	stop      chan struct{}
@@ -118,18 +119,18 @@ func NewSystem(cfgPath string) (*System, error) {
 			vcfg.LoraDev,
 			vcfg.LoraBaud,
 			vcfg.ID,
-			vcfg.GpsDev,
-			vcfg.GpsBaud,
+			vcfg.ArduinoDev,
+			vcfg.ArduinoBaud,
 			time.Duration(vcfg.TelemetryIntervalMs)*time.Millisecond,
 			p,
 		)
 		s.Vehicles = append(s.Vehicles, veh)
 	}
 
-	// construct gps devices from config
-	for _, gpscfg := range cfg.Gpses {
-		gps := device.NewGpsDevice(gpscfg.ID, gpscfg.Dev, gpscfg.Baud)
-		s.Gpses = append(s.Gpses, gps)
+	// construct arduino devices from config
+	for _, arduinoCfg := range cfg.Arduinos {
+		arduino := device.NewArduinoDevice(arduinoCfg.ID, arduinoCfg.Dev, arduinoCfg.Baud)
+		s.Arduinos = append(s.Arduinos, arduino)
 	}
 	return s, nil
 }
@@ -177,24 +178,24 @@ func (s *System) StartAll() error {
 		}
 	}
 
-	// start gps simulation
-	for _, gps := range s.Gpses {
+	// start arduino simulation
+	for _, arduino := range s.Arduinos {
 		s.wg.Add(1)
-		go func(gps *device.GpsDevice) {
+		go func(arduino *device.ArduinoDevice) {
 			defer s.wg.Done()
-			log.Printf("[system] starting GPS %s device %s (baud %d)", gps.ID, gps.Device, gps.Baud)
+			log.Printf("[system] starting arduino %s device %s (baud %d)", arduino.ID, arduino.Device, arduino.Baud)
 			stop := make(chan struct{})
 			go func() {
 				<-s.stop
 				close(stop)
 			}()
 
-			if err := gps.StartSimulation(stop); err != nil {
-				log.Printf("[gps %s] simulate failed: %v", gps.ID, err)
+			if err := arduino.StartSimulation(stop); err != nil {
+				log.Printf("[arduino %s] simulate failed: %v", arduino.ID, err)
 			} else {
-				log.Printf("[gps %s] simulation stopped", gps.ID)
+				log.Printf("[arduino %s] simulation stopped", arduino.ID)
 			}
-		}(gps)
+		}(arduino)
 	}
 	return nil
 }
@@ -206,11 +207,16 @@ func (s *System) StopAll() {
 	if !s.started {
 		return
 	}
+	for _, g := range s.Gateways {
+		g.Stop()
+	}
 	for _, v := range s.Vehicles {
 		v.Stop()
 	}
-	for _, g := range s.Gateways {
-		g.Stop()
+	for _, a := range s.Arduinos {
+		if err := a.Close(); err != nil {
+			log.Printf("[warning] failed to close arduino %s: %v", a.ID, err)
+		}
 	}
 	if s.SocatMgr != nil {
 		s.SocatMgr.Cleanup()

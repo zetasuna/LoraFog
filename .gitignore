@@ -1,2 +1,5 @@
 # Ban tmp folder of Go Air
 cmd/**/tmp/
+
+tmp/data.db
+

@@ -5,33 +5,52 @@ package model
 // VehicleData represents telemetry information reported by a vehicle.
 // It is the common structure shared between vehicles, gateways and fog.
 type VehicleData struct {
-	VehicleID string  `json:"vehicle_id"`
-	Lat       float64 `json:"lat"`
-	Lon       float64 `json:"lon"`
-	HeadCur   float64 `json:"head_current"`
-	HeadTar   float64 `json:"head_target"`
-	LeftSpd   float64 `json:"left_speed"`
-	RightSpd  float64 `json:"right_speed"`
-	PID       float64 `json:"pid"`
+	VehicleID   string  `json:"vehicle_id"`
+	Latitude    float64 `json:"lat"`
+	Longitude   float64 `json:"lon"`
+	CurrentHead int     `json:"head_current"`
+	TargetHead  int     `json:"head_target"`
+	LeftSpeed   int     `json:"left_speed"`
+	RightSpeed  int     `json:"right_speed"`
+	PID         int     `json:"pid"`
 }
 
 // ControlMessage represents a control command sent from Fog to a vehicle.
 // It can be encoded either as JSON or CSV depending on gateway configuration.
 type ControlMessage struct {
 	VehicleID string  `json:"vehicle_id"`
-	Mode      float64 `json:"mode"`
-	Spd       float64 `json:"speed"`
-	Lat       float64 `json:"lat"`
-	Lon       float64 `json:"lon"`
+	Mode      int     `json:"mode"`
+	Speed     int     `json:"speed"`
+	Latitude  float64 `json:"lat"`
+	Longitude float64 `json:"lon"`
 	Kp        float64 `json:"kp"`
 	Ki        float64 `json:"ki"`
 	Kd        float64 `json:"kd"`
 }
 
+// ArduinoData represents telemetry data collected by arduino
+type ArduinoData struct {
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	LeftSpeed   int     `json:"left_speed"`
+	RightSpeed  int     `json:"right_speed"`
+	CurrentHead int     `json:"head_current"`
+}
+
+// ArduinoControl represents telemetry data collected by arduino
+type ArduinoControl struct {
+	MaxSpeed    int     `json:"max_speed"`
+	CruiseSpeed int     `json:"cruise_speed"`
+	TargetHead  int     `json:"target_head"`
+	Kp          float64 `json:"kp"`
+	Ki          float64 `json:"ki"`
+	Kd          float64 `json:"kd"`
+}
+
 // GpsData represents a simple latitude/longitude reading.
 type GpsData struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 }
 
 // GatewayRegistration represents information sent by a gateway

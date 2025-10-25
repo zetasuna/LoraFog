@@ -3,14 +3,15 @@
 package device
 
 import (
-	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"strings"
 	"time"
+
+	"LoraFog/internal/model"
+	"LoraFog/internal/util"
 )
 
 // GpsDevice implements both Device and Simulatable interfaces.
@@ -23,64 +24,64 @@ type GpsDevice struct {
 }
 
 // NewGpsDevice creates a new GPS device based on serial communication.
-func NewGpsDevice(id string, dev string, baud int) *GpsDevice {
-	return &GpsDevice{ID: id, Device: dev, Baud: baud}
+func NewGpsDevice(id string, device string, baud int) *GpsDevice {
+	return &GpsDevice{ID: id, Device: device, Baud: baud}
 }
 
 // --- Implementation of Device interface ---
 
 // Open opens the GPS serial port.
-func (g *GpsDevice) Open() error {
-	if g.Serial != nil {
+func (gps *GpsDevice) Open() error {
+	if gps.Serial != nil {
 		return nil
 	}
-	sd, err := NewSerialDevice(g.Device, g.Baud)
+	serialDevice, err := NewSerialDevice(gps.Device, gps.Baud)
 	if err != nil {
 		return fmt.Errorf("open gps serial failed: %w", err)
 	}
-	g.Serial = sd
+	gps.Serial = serialDevice
 	return nil
 }
 
 // Close closes the GPS serial port safely.
-func (g *GpsDevice) Close() error {
-	if g.Serial == nil {
+func (gps *GpsDevice) Close() error {
+	if gps.Serial == nil {
 		return nil
 	}
-	err := g.Serial.Close()
-	g.Serial = nil
+	err := gps.Serial.Close()
+	gps.Serial = nil
 	return err
 }
 
 // ReadLine reads one NMEA line from the GPS.
-func (g *GpsDevice) ReadLine(timeout time.Duration) (string, error) {
-	if g.Serial == nil {
+func (gps *GpsDevice) ReadLine(timeout time.Duration) (string, error) {
+	if gps.Serial == nil {
 		return "", errors.New("gps serial not open")
 	}
-	return g.Serial.ReadLine(timeout)
+	return gps.Serial.ReadLine(timeout)
 }
 
 // WriteLine writes a string to the GPS port (rarely used, but provided for interface compatibility).
-func (g *GpsDevice) WriteLine(s string) error {
-	if g.Serial == nil {
+func (gps *GpsDevice) WriteLine(dataOut string) error {
+	if gps.Serial == nil {
 		return errors.New("gps serial not open")
 	}
-	return g.Serial.WriteLine(s)
+	return gps.Serial.WriteLine(dataOut)
 }
 
 // --- Additional functions ---
 
 // Read continuously streams GPS data and pushes parsed coordinates to a channel.
 // Returns a stop function to safely terminate the loop.
-func (g *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
-	if err := g.Open(); err != nil {
+func (gps *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
+	if err := gps.Open(); err != nil {
 		return nil, err
 	}
 
 	stop := make(chan struct{})
 	go func() {
 		defer func() {
-			_ = g.Close()
+			_ = gps.Close()
 			close(out)
 		}()
 
@@ -91,25 +92,26 @@ func (g *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
 			default:
 			}
 
-			line, err := g.ReadLine(0)
+			dataIn, err := gps.ReadLine(0)
 			if err != nil {
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "$GPGGA") && !strings.HasPrefix(line, "$GNRMC") {
+			dataIn = strings.TrimSpace(dataIn)
+			if !strings.HasPrefix(dataIn, "$GPRMC") && !strings.HasPrefix(dataIn, "$GNRMC") {
 				continue
 			}
-			parts := strings.Split(line, ",")
-			if len(parts) < 6 {
+			parts := strings.Split(dataIn, ",")
+			if len(parts) < 7 || parts[3] == "" || parts[5] == "" {
 				continue
 			}
-			lat, err1 := util.ParseNMEACoord(parts[2], parts[3])
-			lon, err2 := util.ParseNMEACoord(parts[4], parts[5])
+			lat, err1 := util.ParseNMEACoord(parts[3], parts[4])
+			lon, err2 := util.ParseNMEACoord(parts[5], parts[6])
 			if err1 != nil || err2 != nil {
+				log.Printf("[gps] Skip invalid coord: %s", dataIn)
 				continue
 			}
-			out <- model.GpsData{Lat: lat, Lon: lon}
+			out <- model.GpsData{Latitude: lat, Longitude: lon}
 		}
 	}()
 	return func() { close(stop) }, nil
@@ -118,22 +120,22 @@ func (g *GpsDevice) Read(out chan<- model.GpsData) (func(), error) {
 // --- Implementation of Simulatable interface ---
 
 // StartSimulation continuously writes fake GPS NMEA sentences to the port until stop is closed.
-func (g *GpsDevice) StartSimulation(stop <-chan struct{}) error {
-	if err := g.Open(); err != nil {
+func (gps *GpsDevice) StartSimulation(stop <-chan struct{}) error {
+	if err := gps.Open(); err != nil {
 		return err
 	}
 	defer func() {
-		if err := g.Close(); err != nil {
-			log.Printf("warning: failed to close gps device: %v", err)
+		if err := gps.Close(); err != nil {
+			log.Printf("[warning] Failed to close gps device: %v", err)
 		}
 	}()
 
-	fmt.Printf("GPS simulator started on %s (baud %d)\n", g.Device, g.Baud)
+	fmt.Printf("[gps %s] Simulator started on %s (baud %d)\n", gps.ID, gps.Device, gps.Baud)
 
 	for {
 		select {
 		case <-stop:
-			fmt.Println("GPS simulation stopped.")
+			fmt.Printf("[gps %s] Simulation stopped.\n", gps.ID)
 			return nil
 		default:
 		}
@@ -143,13 +145,16 @@ func (g *GpsDevice) StartSimulation(stop <-chan struct{}) error {
 		latStr, latDir := util.ToNMEACoord(lat, true)
 		lonStr, lonDir := util.ToNMEACoord(lon, false)
 		timeUTC := time.Now().UTC().Format("150405.00")
+		valid := "A"
 
-		nmea := fmt.Sprintf("$GPGGA,%s,%s,%s,%s,%s,1,08,0.9,10.0,M,0.0,M,,*47\r\n",
-			timeUTC, latStr, latDir, lonStr, lonDir)
+		nmea := fmt.Sprintf("$GPRMC,%s,%s,%s,%s,%s,%s,3.332,272.24,241025,,,A*69\r\n",
+			timeUTC, valid, latStr, latDir, lonStr, lonDir)
 
-		if err := g.WriteLine(nmea); err != nil {
-			log.Printf("GPS simulate write error: %v", err)
+		if err := gps.WriteLine(nmea); err != nil {
+			log.Printf("[gps %s] simulate write error: %v", gps.ID, err)
+		} else {
+			log.Printf("[gps %s] simulate write: %s", gps.ID, nmea)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 }

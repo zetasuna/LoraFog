@@ -1,75 +1,74 @@
 package core
 
 import (
+	"log"
+	"sync"
+	"time"
+
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
 	"LoraFog/internal/parser"
-	"log"
-	"math"
-	"sync"
-	"time"
 )
 
-// Vehicle represents a vehicle agent that reads GPS data and periodically
+// Vehicle represents a vehicle agent that reads telemetry and periodically
 // sends telemetry via an underlying Device (e.g., LoRa serial).
 type Vehicle struct {
-	ID        string
-	Device    device.Device
-	GpsDevice *device.GpsDevice
-	Parser    parser.Parser
-	Interval  time.Duration
+	ID            string
+	Device        device.Device
+	ArduinoDevice *device.ArduinoDevice
+	Parser        parser.Parser
+	Interval      time.Duration
 
-	stop       chan struct{}
-	wg         sync.WaitGroup
-	last       model.GpsData
-	lastUpdate time.Time
-	gpsFn      func()
+	stop          chan struct{}
+	wg            sync.WaitGroup
+	lastTelemetry model.ArduinoData
+	lastUpdate    time.Time
+	arduinoFn     func()
 }
 
 // NewVehicle constructs a Vehicle with given identifiers, device paths and parser.
-// It will attempt to open the LoRa serial device; if GpsDevice is provided a GPS device is created.
-func NewVehicle(id, loraDev string, loraBaud int, gpsID string, gpsDev string, gpsBaud int, interval time.Duration, p parser.Parser) *Vehicle {
+func NewVehicle(id, loraDev string, loraBaud int, arduinoID string, arduinoDev string, arduinoBaud int, interval time.Duration, p parser.Parser) *Vehicle {
 	dev, _ := device.NewSerialDevice(loraDev, loraBaud)
 	v := &Vehicle{ID: id, Device: dev, Parser: p, Interval: interval, stop: make(chan struct{})}
-	if gpsDev != "" {
-		v.GpsDevice = device.NewGpsDevice(gpsID, gpsDev, gpsBaud)
+	if arduinoDev != "" {
+		v.ArduinoDevice = device.NewArduinoDevice(arduinoID, arduinoDev, arduinoBaud)
 	}
 	return v
 }
 
 // Start initializes the vehicle data acquisition and telemetry loop.
-// It starts reading GPS data and immediately sends telemetry upon new data arrival.
+// It starts reading Arduino data and immediately sends telemetry upon new data arrival.
 // Optionally, it may still include a periodic heartbeat if needed.
 func (v *Vehicle) Start() error {
-	// Start GPS reader if available
-	if v.GpsDevice != nil {
-		ch := make(chan model.GpsData, 5)
+	// Start Arduino reader if available
+	if v.ArduinoDevice != nil {
+		ch := make(chan model.ArduinoData, 5)
 
-		// Start reading GPS asynchronously
-		stop, err := v.GpsDevice.Read(ch)
+		// Start reading Arduino asynchronously
+		stop, err := v.ArduinoDevice.Read(ch)
 		if err != nil {
-			log.Printf("[vehicle %s] gps start err: %v", v.ID, err)
+			log.Printf("[vehicle %s] Arduino start err: %v", v.ID, err)
 		} else {
-			log.Printf("[vehicle %s] gps start: success", v.ID)
-			v.gpsFn = stop
+			log.Printf("[vehicle %s] Arduino start: success", v.ID)
+			v.arduinoFn = stop
 			v.wg.Add(1)
 			go func() {
 				defer v.wg.Done()
 				for {
 					select {
 					case <-v.stop:
-						log.Printf("[vehicle %s] stopping GPS loop", v.ID)
+						log.Printf("[vehicle %s] Stopping Arduino loop", v.ID)
 						return
-					case g, ok := <-ch:
+					case arduinoData, ok := <-ch:
 						if !ok {
-							log.Printf("[vehicle %s] gps channel closed", v.ID)
+							log.Printf("[vehicle %s] Arduino channel closed", v.ID)
 							return
 						}
-						// Update last GPS reading
-						v.last = g
+						// Update last Arduino reading
+						v.lastTelemetry = arduinoData
 						v.lastUpdate = time.Now()
-						// Immediately send telemetry when new GPS data arrives
 						v.sendTelemetry()
+						log.Printf("[vehicle %s] sended telemetry", v.ID)
 					}
 				}
 			}()
@@ -89,7 +88,7 @@ func (v *Vehicle) Start() error {
 					log.Printf("[vehicle %s] stopping heartbeat", v.ID)
 					return
 				case <-ticker.C:
-					// Only send heartbeat if no GPS data for a while
+					// Only send heartbeat if no Arduino data for a while
 					if time.Since(v.lastUpdate) > v.Interval {
 						log.Printf("[vehicle %s] sending heartbeat", v.ID)
 						v.sendTelemetry()
@@ -102,7 +101,7 @@ func (v *Vehicle) Start() error {
 	return nil
 }
 
-// Stop stops the vehicle goroutines, GPS provider and closes the device.
+// Stop stops the vehicle goroutines, Arduino provider and closes the device.
 func (v *Vehicle) Stop() {
 	// close stop channel (idempotent)
 	select {
@@ -111,8 +110,8 @@ func (v *Vehicle) Stop() {
 	default:
 		close(v.stop)
 	}
-	if v.gpsFn != nil {
-		v.gpsFn()
+	if v.arduinoFn != nil {
+		v.arduinoFn()
 	}
 	if v.Device != nil {
 		_ = v.Device.Close()
@@ -120,24 +119,22 @@ func (v *Vehicle) Stop() {
 	v.wg.Wait()
 }
 
-// sendTelemetry builds a VehicleData from last GPS/fallback values and writes it to the Device.
+// sendTelemetry builds a VehicleData from last data/fallback values and writes it to the Device.
 func (v *Vehicle) sendTelemetry() {
-	lat, lon := v.last.Lat, v.last.Lon
-	if lat == 0 && lon == 0 {
+	latitude, longitude := v.lastTelemetry.Latitude, v.lastTelemetry.Longitude
+	if latitude == 0 && longitude == 0 {
 		// fallback coordinate (Hanoi)
-		lat, lon = 21.0285, 105.8048
+		latitude, longitude = 21.0285, 105.8048
 	}
-	headCur := math.Mod(float64(time.Now().UnixNano()/1e6)/100.0, 360.0)
-	headTar := headCur
 	vd := model.VehicleData{
-		VehicleID: v.ID,
-		Lat:       lat,
-		Lon:       lon,
-		HeadCur:   headCur,
-		HeadTar:   headTar,
-		LeftSpd:   100,
-		RightSpd:  100,
-		PID:       1.0,
+		VehicleID:   v.ID,
+		Latitude:    latitude,
+		Longitude:   longitude,
+		CurrentHead: v.lastTelemetry.CurrentHead,
+		TargetHead:  v.lastTelemetry.CurrentHead,
+		LeftSpeed:   v.lastTelemetry.LeftSpeed,
+		RightSpeed:  v.lastTelemetry.RightSpeed,
+		PID:         1,
 	}
 	line, err := v.Parser.EncodeTelemetry(vd)
 	if err != nil {

@@ -2,15 +2,15 @@ global:
   wire_format: "csv"
 
 server:
-  fog_addr: ":10000"
+  fog_addr: "http://127.0.0.1:10000"
   app_addr: "http://127.0.0.1:3001"
   gateway_registry:
     - id: "GW01"
-      url: "http://127.0.0.1:10000"
-      vehicles: ["V01"]
-    - id: "GW02"
-      url: "http://127.0.0.1:10000"
-      vehicles: ["V02"]
+      url: "http://127.0.0.1:10001"
+      vehicles: ["VH01"]
+    # - id: "GW02"
+    #   url: "http://127.0.0.1:10002"
+    #   vehicles: ["VH02"]
 
 gateways:
   - id: "GW01"
@@ -20,40 +20,39 @@ gateways:
     wire_out: "json" # format gửi lên fog
     lora_device: "/tmp/ttyGW1"
     lora_baud: 9600
-    vehicles: ["00001"]
+    vehicles: ["VH01"]
   - id: "GW02"
     url: "http://127.0.0.1:10002"
     fog_url: "http://127.0.0.1:10000"
     wire_in: "csv" # format nhận từ vehicle
     wire_out: "csv" # format gửi lên fog
     lora_device: "/tmp/ttyGW2"
+    # lora_device: "/dev/lora"
     lora_baud: 9600
-    vehicles: ["00002"]
+    vehicles: ["VH02"]
 
 vehicles:
-  - id: "00001"
+  - id: "VH01"
     wire_format: "csv"
     telemetry_interval_ms: -1
-    lora_device: "/tmp/ttyLR1"
+    lora_device: "/tmp/ttyVH1"
     lora_baud: 9600
-    gps_id: "GPS01"
-    gps_device: "/tmp/ttyGPSR1"
-    gps_baud: 9600
-  - id: "00002"
+    arduino_id: "GPS01"
+    arduino_device: "/tmp/ttyADR1"
+    arduino_baud: 9600
+  - id: "VH02"
     wire_format: "csv"
     telemetry_interval_ms: -1
-    lora_device: "/tmp/ttyLR2"
+    lora_device: "/tmp/ttyVH2"
     lora_baud: 9600
-    gps_id: "GPS02"
-    gps_device: "/tmp/ttyGPSR2"
-    gps_baud: 9600
+    arduino_id: "GPS02"
+    # arduino_device: "/tmp/ttyADR2"
+    arduino_device: "/dev/arduino"
+    arduino_baud: 9600
 
-gpses:
-  - id: "GPS01"
-    device: "/tmp/ttyGPSS1"
-    baud: 9600
-  - id: "GPS02"
-    device: "/tmp/ttyGPSS2"
+arduinos:
+  - id: "AD01"
+    device: "/tmp/ttyADS1"
     baud: 9600
 
 virtual_serials:
@@ -61,13 +60,21 @@ virtual_serials:
   pairs:
     - type: "gateway-vehicle"
       left: "/tmp/ttyGW1"
-      right: "/tmp/ttyLR1"
+      right: "/tmp/ttyVH1"
+    - type: "arduino-vehicle"
+      left: "/tmp/ttyADS1"
+      right: "/tmp/ttyADR1"
     - type: "gateway-vehicle"
       left: "/tmp/ttyGW2"
-      right: "/tmp/ttyLR2"
-    - type: "gps-vehicle"
-      left: "/tmp/ttyGPSS1"
-      right: "/tmp/ttyGPSR1"
-    - type: "gps-vehicle"
-      left: "/tmp/ttyGPSS2"
-      right: "/tmp/ttyGPSR2"
+      right: "/tmp/ttyVH2"
+    # - type: "arduino-vehicle"
+    #   left: "/tmp/ttyGPSS2"
+    #   right: "/tmp/ttyGPSR2"
+# gpses:
+#   - id: "GPS01"
+#     device: "/tmp/ttyGPSS1"
+#     baud: 9600
+#   - id: "GPS02"
+#     device: "/tmp/ttyGPSS2"
+#     baud: 9600
+

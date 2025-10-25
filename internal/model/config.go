@@ -9,7 +9,7 @@ type Config struct {
 	Server         ServerConfig        `yaml:"server"`
 	Gateways       []GatewayConfig     `yaml:"gateways"`
 	Vehicles       []VehicleConfig     `yaml:"vehicles"`
-	Gpses          []GpsConfig         `yaml:"gpses"`
+	Arduinos       []ArduinoConfig     `yaml:"arduinos"`
 	VirtualSerials VirtualSerialConfig `yaml:"virtual_serials"`
 }
 
@@ -51,9 +51,16 @@ type VehicleConfig struct {
 	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms"`
 	LoraDev             string `yaml:"lora_device"`
 	LoraBaud            int    `yaml:"lora_baud"`
-	GpsID               string `yaml:"gps_id"`
-	GpsDev              string `yaml:"gps_device"`
-	GpsBaud             int    `yaml:"gps_baud"`
+	ArduinoID           string `yaml:"arduino_id"`
+	ArduinoDev          string `yaml:"arduino_device"`
+	ArduinoBaud         int    `yaml:"arduino_baud"`
+}
+
+// ArduinoConfig defines serial setup for testing
+type ArduinoConfig struct {
+	ID   string `yaml:"id"`
+	Dev  string `yaml:"device"`
+	Baud int    `yaml:"baud"`
 }
 
 // GpsConfig defines serial setup for testing
