@@ -1,0 +1,29 @@
+{{define "content"}}
+<div class="max-w-4xl mx-auto">
+  <h1 class="text-2xl font-bold mb-4">Vehicles</h1>
+  <table
+    class="w-full border border-gray-300 bg-white shadow rounded-lg table-striped"
+  >
+    <thead class="bg-gray-100 text-left">
+      <tr>
+        <th class="p-2 border-b">Vehicle ID</th>
+        <th class="p-2 border-b">Telemetry</th>
+        <th class="p-2 border-b">Status</th>
+      </tr>
+    </thead>
+    <tbody
+      id="vehicle-table"
+      hx-get="/api/latest"
+      hx-trigger="load, every 5s"
+      hx-target="#vehicle-table"
+      hx-swap="innerHTML"
+    >
+      <tr>
+        <td class="p-2 border-b">v1</td>
+        <td class="p-2 border-b text-gray-600">waiting…</td>
+        <td class="p-2 border-b text-yellow-600">Pending</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+{{end}} {{template "layout" .}}

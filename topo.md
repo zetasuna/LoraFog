@@ -1,13 +1,13 @@
-Câu hỏi của bạn rất hay — đây là điểm **rất quan trọng khi thiết kế mô hình thực tế xe tự hành sử dụng LoRa trong kiến trúc Fog Computing**.
-Mình sẽ giải thích **rõ ràng, chính xác và bám sát thực tế triển khai**, để bạn hiểu **mức nào cần gateway, mức nào cần server, và cách bố trí chúng trong toàn hệ thống**.
-
+---
+title: Mô hình hệ thống
 ---
 
 ## 🎯 Mục tiêu của mô hình
 
-> Một nhóm xe tự hành (autonomous vehicles) **trao đổi dữ liệu với nhau bằng LoRa (V2V)**,
-> đồng thời vẫn kết nối được với **Fog server** gần (ở cạnh đường hoặc trên cloud cục bộ)
-> để chia sẻ, xử lý, và lưu trữ dữ liệu — tức là một mô hình **Fog Computing thực thụ**.
+> Một nhóm xe tự hành (autonomous vehicles) **trao đổi dữ liệu với nhau
+> bằng LoRa (V2V)**, đồng thời vẫn kết nối được với **Fog server** gần
+> (ở cạnh đường hoặc trên cloud cục bộ) để chia sẻ, xử lý,
+> và lưu trữ dữ liệu — tức là một mô hình **Fog Computing thực thụ**.
 
 ---
 
@@ -54,7 +54,8 @@ Mỗi xe là một **nút (node)** trong mạng LoRa.
 - **Chức năng chính:**
   - Gửi beacon vị trí, vận tốc, hướng.
   - Nhận cảnh báo từ xe khác.
-  - Nếu có thể, gửi dữ liệu cảm biến lên Fog Server (qua Wi-Fi/4G hoặc qua LoRa Gateway gần nhất).
+  - Nếu có thể, gửi dữ liệu cảm biến lên Fog Server
+    (qua Wi-Fi/4G hoặc qua LoRa Gateway gần nhất).
 
 - **Thành phần:**
   - MCU hoặc SBC (Raspberry Pi, Jetson Nano…)
@@ -70,11 +71,13 @@ Mỗi xe là một **nút (node)** trong mạng LoRa.
 
 ### 2️⃣ **Gateway (Fog Gateway / RSU)**
 
-Fog Gateway (hoặc còn gọi là RSU – _Road Side Unit_) là **thành phần trung gian giữa các xe và hệ thống Fog/Cloud**.
+Fog Gateway (hoặc còn gọi là RSU – _Road Side Unit_)
+là **thành phần trung gian giữa các xe và hệ thống Fog/Cloud**.
 
 - **Có thể là:**
   - Một thiết bị cố định dọc đường (RSU)
-  - Hoặc một xe được chọn làm **“leader vehicle”**, đóng vai trò gateway tạm thời cho nhóm xe.
+  - Hoặc một xe được chọn làm **“leader vehicle”**,
+    đóng vai trò gateway tạm thời cho nhóm xe.
 
 - **Nhiệm vụ chính:**
   - Thu dữ liệu LoRa từ nhiều xe.
@@ -99,7 +102,8 @@ Fog Gateway (hoặc còn gọi là RSU – _Road Side Unit_) là **thành phần
 
 - **Chức năng:**
   - Nhận dữ liệu từ gateway.
-  - Chạy mô hình phân tích (AI/ML inference) để nhận diện nguy cơ, phân tích luồng giao thông.
+  - Chạy mô hình phân tích (AI/ML inference)
+    để nhận diện nguy cơ, phân tích luồng giao thông.
   - Ra lệnh cảnh báo hoặc điều phối (gửi lại cho xe).
   - Lưu trữ tạm thời (1–3 ngày) trước khi đồng bộ lên Cloud.
 
@@ -113,7 +117,9 @@ Fog Gateway (hoặc còn gọi là RSU – _Road Side Unit_) là **thành phần
 
 ### 4️⃣ **Cloud Server (Tùy chọn)**
 
-Không bắt buộc trong thử nghiệm nhỏ, nhưng trong mô hình chuẩn thực tế **Fog–Cloud**, nó là tầng cuối.
+Không bắt buộc trong thử nghiệm nhỏ,
+nhưng trong mô hình chuẩn thực tế **Fog–Cloud**,
+nó là tầng cuối.
 
 - **Nhiệm vụ:**
   - Lưu trữ dài hạn.
@@ -138,46 +144,24 @@ Không bắt buộc trong thử nghiệm nhỏ, nhưng trong mô hình chuẩn t
 
 ```
      ┌───────────────────────────────────────────────┐
-     │                   CLOUD SERVER               │
-     │ (AI, Database, OTA, Analytics)               │
+     │                  CLOUD SERVER                 │
+     │        (AI, Database, OTA, Analytics)         │
      └───────────────────────────────────────────────┘
-                        ▲
-                        │  (Internet / 4G/5G)
-                        │
+                             │
+                             │  (Internet / 4G/5G)
+                             │
      ┌───────────────────────────────────────────────┐
      │                FOG SERVER / RSU               │
      │ (Edge processing, local decision, MQTT broker)│
-     └─────────────┬─────────────────────────────────┘
-                   │  (LoRaWAN uplink or Wi-Fi)
-                   │
-           ┌───────┴────────┐
-           │                │
-     ┌────────────┐   ┌────────────┐
-     │  VEHICLE 1 │   │  VEHICLE 2 │
-     │(LoRa Node) │   │(LoRa Node) │
-     └────────────┘   └────────────┘
-           ↕                 ↕
-       LoRa P2P  ←──────→  LoRa P2P
+     └───────────────────────┬───────────────────────┘
+                             │  (LoRaWAN uplink/downlink)
+                             │
+                    ┌────────┴────────┐
+                    │                 │
+             ┌─────────────┐   ┌─────────────┐
+             │  VEHICLE 1  │   │  VEHICLE 2  │
+             │ (LoRa Node) │   │ (LoRa Node) │
+             └─────────────┘   └─────────────┘
+                    ↕                 ↕
+                LoRa P2P  ←──────→  LoRa P2P
 ```
-
----
-
-## 🧩 Kết luận — có cần Gateway / Server không?
-
-| Cấu hình                                 | Dành cho mục đích               | Có Gateway không               | Có Server không                  |
-| ---------------------------------------- | ------------------------------- | ------------------------------ | -------------------------------- |
-| **Chỉ test LoRa giữa 2 xe**              | Kiểm tra truyền nhận cơ bản     | ❌ Không cần                   | ❌ Không cần                     |
-| **Nhóm 3–5 xe chạy phối hợp vùng**       | Mô phỏng giao tiếp nhóm         | ✅ Có thể 1 xe làm Gateway     | ✅ Fog mini server (laptop/PC)   |
-| **Mô hình thật / triển khai ngoài trời** | Môi trường thật, xử lý phân tán | ✅ Bắt buộc (RSU/Gateway thật) | ✅ Bắt buộc (Fog server / Cloud) |
-
-➡️ **Tóm lại:**
-
-- **Xe → Xe (LoRa)**: giao tiếp trực tiếp peer-to-peer.
-- **Xe → Gateway → Fog → Cloud**: là luồng dữ liệu phân tán, đúng chuẩn mô hình **Fog Computing**.
-- Nếu bạn chỉ đang thử nghiệm LoRa giao tiếp, **chưa cần Gateway**.
-- Nếu bạn làm mô hình **Fog thực tế**, **bắt buộc có Gateway + Fog Server**.
-
----
-
-Nếu bạn muốn mình **vẽ sơ đồ tổng thể (đúng chuẩn nghiên cứu Fog Computing)** dạng **hình minh họa kỹ thuật (SVG/PNG)** để bạn dùng cho **báo cáo / bài luận / poster**, mình có thể tạo ngay.
-👉 Bạn có muốn mình **tạo hình sơ đồ tổng thể** (có các lớp Vehicle, Fog, Cloud + LoRa link) không?

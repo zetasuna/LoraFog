@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// Mở cổng serial (sửa đường dẫn tùy hệ thống)
-	port, err := serial.Open("/dev/serial0", &serial.Mode{
+	port, err := serial.Open("/dev/lora", &serial.Mode{
 		BaudRate: 9600,
 	})
 	if err != nil {

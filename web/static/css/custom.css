@@ -1,0 +1,62 @@
+/* Custom UI tweaks for LoraFog dashboard */
+
+/* Scrollbar styling (for Chrome, Edge, Safari) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #9ca3af;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #6b7280;
+}
+
+/* Card hover animation */
+.card {
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* Table stripe and hover */
+.table-striped tbody tr:nth-child(odd) {
+  background-color: #f9fafb;
+}
+.table-striped tbody tr:hover {
+  background-color: #eef2ff;
+}
+
+/* Toast animation */
+.toast-enter {
+  animation: fadeIn 0.3s ease-out;
+}
+.toast-leave {
+  animation: fadeOut 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
