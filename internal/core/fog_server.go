@@ -255,7 +255,7 @@ func (f *FogServer) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1: decode incoming control message (Fog → Gateway)
-	var ctl model.ControlMessage
+	var ctl model.ControlData
 	// Try JSON first
 	if err := json.Unmarshal(body, &ctl); err != nil {
 		// Try CSV fallback

@@ -3,8 +3,9 @@
 package parser
 
 import (
-	"LoraFog/internal/model"
 	"encoding/json"
+
+	"LoraFog/internal/model"
 )
 
 // JSONParser implements Parser interface using JSON serialization.
@@ -26,15 +27,15 @@ func (p *JSONParser) DecodeTelemetry(s string) (model.VehicleData, error) {
 	return v, err
 }
 
-// EncodeControl encodes ControlMessage into JSON string.
-func (p *JSONParser) EncodeControl(c model.ControlMessage) (string, error) {
+// EncodeControl encodes ControlData into JSON string.
+func (p *JSONParser) EncodeControl(c model.ControlData) (string, error) {
 	b, err := json.Marshal(c)
 	return string(b), err
 }
 
-// DecodeControl decodes JSON string into ControlMessage.
-func (p *JSONParser) DecodeControl(s string) (model.ControlMessage, error) {
-	var c model.ControlMessage
+// DecodeControl decodes JSON string into ControlData.
+func (p *JSONParser) DecodeControl(s string) (model.ControlData, error) {
+	var c model.ControlData
 	err := json.Unmarshal([]byte(s), &c)
 	return c, err
 }

@@ -13,9 +13,9 @@ type Parser interface {
 	// DecodeTelemetry parses a raw string into a structured VehicleData.
 	DecodeTelemetry(string) (model.VehicleData, error)
 
-	// EncodeControl converts a ControlMessage into a wire string (CSV/JSON).
-	EncodeControl(model.ControlMessage) (string, error)
+	// EncodeControl converts a ControlData into a wire string (CSV/JSON).
+	EncodeControl(model.ControlData) (string, error)
 
-	// DecodeControl parses a raw string into a structured ControlMessage.
-	DecodeControl(string) (model.ControlMessage, error)
+	// DecodeControl parses a raw string into a structured ControlData.
+	DecodeControl(string) (model.ControlData, error)
 }

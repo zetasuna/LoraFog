@@ -51,18 +51,18 @@ func (p *CSVParser) DecodeTelemetry(line string) (model.VehicleData, error) {
 	}, nil
 }
 
-// EncodeControl converts a ControlMessage into CSV string.
-func (p *CSVParser) EncodeControl(c model.ControlMessage) (string, error) {
-	line := fmt.Sprintf("%s,%d,%d,%.6f,%.6f,%.2f,%.2f,%.2f",
+// EncodeControl converts a ControlData into CSV string.
+func (p *CSVParser) EncodeControl(c model.ControlData) (string, error) {
+	line := fmt.Sprintf("%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f",
 		c.VehicleID, c.Mode, c.Speed, c.Latitude, c.Longitude, c.Kp, c.Ki, c.Kd)
 	return line, nil
 }
 
-// DecodeControl parses a CSV control message into ControlMessage struct.
-func (p *CSVParser) DecodeControl(line string) (model.ControlMessage, error) {
+// DecodeControl parses a CSV control message into ControlData struct.
+func (p *CSVParser) DecodeControl(line string) (model.ControlData, error) {
 	fields := strings.Split(strings.TrimSpace(line), ",")
 	if len(fields) != 8 {
-		return model.ControlMessage{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
+		return model.ControlData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
 	}
 
 	mode, _ := strconv.ParseFloat(fields[1], 64)
@@ -73,7 +73,7 @@ func (p *CSVParser) DecodeControl(line string) (model.ControlMessage, error) {
 	ki, _ := strconv.ParseFloat(fields[6], 64)
 	kd, _ := strconv.ParseFloat(fields[7], 64)
 
-	return model.ControlMessage{
+	return model.ControlData{
 		VehicleID: fields[0],
 		Mode:      int(mode),
 		Speed:     int(speed),

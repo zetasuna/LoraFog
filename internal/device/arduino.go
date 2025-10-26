@@ -106,7 +106,7 @@ func (arduino *ArduinoDevice) Read(out chan<- model.ArduinoData) (func(), error)
 			}
 
 			parts := strings.Split(dataIn, ",")
-			if len(parts) > 5 {
+			if len(parts) > 6 {
 				continue
 			}
 			latitude, _ := strconv.ParseFloat(parts[0], 64)
@@ -114,12 +114,14 @@ func (arduino *ArduinoDevice) Read(out chan<- model.ArduinoData) (func(), error)
 			leftSpeed, _ := strconv.ParseFloat(parts[2], 64)
 			rightSpeed, _ := strconv.ParseFloat(parts[3], 64)
 			currentHead, _ := strconv.ParseFloat(parts[4], 64)
+			targetHead, _ := strconv.ParseFloat(parts[5], 64)
 			out <- model.ArduinoData{
 				Latitude:    latitude,
 				Longitude:   longitude,
 				LeftSpeed:   int(leftSpeed),
 				RightSpeed:  int(rightSpeed),
 				CurrentHead: int(currentHead),
+				TargetHead:  int(targetHead),
 			}
 		}
 	}()
@@ -154,10 +156,16 @@ func (arduino *ArduinoDevice) StartSimulation(stop <-chan struct{}) error {
 			LeftSpeed:   1000,
 			RightSpeed:  1000,
 			CurrentHead: 0 + (rand.Intn(361)),
+			TargetHead:  0 + (rand.Intn(361)),
 		}
 
-		message := fmt.Sprintf("%.6f,%.6f,%d,%d,%d",
-			arduinoData.Latitude, arduinoData.Longitude, arduinoData.LeftSpeed, arduinoData.RightSpeed, arduinoData.CurrentHead)
+		message := fmt.Sprintf("%.6f,%.6f,%d,%d,%d,%d",
+			arduinoData.Latitude,
+			arduinoData.Longitude,
+			arduinoData.LeftSpeed,
+			arduinoData.RightSpeed,
+			arduinoData.CurrentHead,
+			arduinoData.TargetHead)
 		if err := arduino.WriteLine(message); err != nil {
 			log.Printf("[arduino %s] simulate write error: %v", arduino.ID, err)
 		} else {

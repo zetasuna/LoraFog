@@ -2,27 +2,39 @@
 // gateways, and the fog server, including telemetry and control messages.
 package model
 
+type PacketType string
+
+const (
+	PacketTelemetry PacketType = "t"
+	PacketControl   PacketType = "c"
+)
+
+type Packet struct {
+	Type PacketType `json:"type"`
+	Data any        `json:"data"`
+}
+
 // VehicleData represents telemetry information reported by a vehicle.
 // It is the common structure shared between vehicles, gateways and fog.
 type VehicleData struct {
 	VehicleID   string  `json:"vehicle_id"`
-	Latitude    float64 `json:"lat"`
-	Longitude   float64 `json:"lon"`
-	CurrentHead int     `json:"head_current"`
-	TargetHead  int     `json:"head_target"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	CurrentHead int     `json:"current_head"`
+	TargetHead  int     `json:"target_head"`
 	LeftSpeed   int     `json:"left_speed"`
 	RightSpeed  int     `json:"right_speed"`
 	PID         int     `json:"pid"`
 }
 
-// ControlMessage represents a control command sent from Fog to a vehicle.
+// ControlData represents a control command sent from Fog to a vehicle.
 // It can be encoded either as JSON or CSV depending on gateway configuration.
-type ControlMessage struct {
+type ControlData struct {
 	VehicleID string  `json:"vehicle_id"`
 	Mode      int     `json:"mode"`
 	Speed     int     `json:"speed"`
-	Latitude  float64 `json:"lat"`
-	Longitude float64 `json:"lon"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 	Kp        float64 `json:"kp"`
 	Ki        float64 `json:"ki"`
 	Kd        float64 `json:"kd"`
@@ -34,14 +46,15 @@ type ArduinoData struct {
 	Longitude   float64 `json:"longitude"`
 	LeftSpeed   int     `json:"left_speed"`
 	RightSpeed  int     `json:"right_speed"`
-	CurrentHead int     `json:"head_current"`
+	CurrentHead int     `json:"current_head"`
+	TargetHead  int     `json:"target_head"`
 }
 
 // ArduinoControl represents telemetry data collected by arduino
 type ArduinoControl struct {
-	MaxSpeed    int     `json:"max_speed"`
 	CruiseSpeed int     `json:"cruise_speed"`
-	TargetHead  int     `json:"target_head"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
 	Kp          float64 `json:"kp"`
 	Ki          float64 `json:"ki"`
 	Kd          float64 `json:"kd"`
