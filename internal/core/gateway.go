@@ -167,7 +167,7 @@ func (g *Gateway) loop() {
 }
 
 // handleControl receives a control message from Fog (JSON or CSV),
-// decodes into ControlMessage, re-encodes into wire_in format, and
+// decodes into ControlData, re-encodes into wire_in format, and
 // sends it downlink to the Vehicle via LoRa.
 func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 	defer func() {
@@ -188,7 +188,7 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1: decode incoming control message (Fog → Gateway)
-	var ctl model.ControlMessage
+	var ctl model.ControlData
 	// Try JSON first
 	if err := json.Unmarshal(body, &ctl); err != nil {
 		// Try CSV fallback

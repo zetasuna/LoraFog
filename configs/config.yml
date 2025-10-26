@@ -19,17 +19,17 @@ gateways:
     wire_in: "csv" # format nhận từ vehicle
     wire_out: "json" # format gửi lên fog
     lora_device: "/tmp/ttyGW1"
-    lora_baud: 9600
-    vehicles: ["VH01"]
-  - id: "GW02"
-    url: "http://127.0.0.1:10002"
-    fog_url: "http://127.0.0.1:10000"
-    wire_in: "csv" # format nhận từ vehicle
-    wire_out: "csv" # format gửi lên fog
-    lora_device: "/tmp/ttyGW2"
     # lora_device: "/dev/lora"
     lora_baud: 9600
-    vehicles: ["VH02"]
+    vehicles: ["VH01"]
+  # - id: "GW02"
+  #   url: "http://127.0.0.1:10002"
+  #   fog_url: "http://127.0.0.1:10000"
+  #   wire_in: "csv" # format nhận từ vehicle
+  #   wire_out: "csv" # format gửi lên fog
+  #   lora_device: "/tmp/ttyGW2"
+  #   lora_baud: 9600
+  #   vehicles: ["VH02"]
 
 vehicles:
   - id: "VH01"
@@ -38,22 +38,25 @@ vehicles:
     lora_device: "/tmp/ttyVH1"
     lora_baud: 9600
     arduino_id: "GPS01"
-    arduino_device: "/tmp/ttyADR1"
-    arduino_baud: 9600
-  - id: "VH02"
-    wire_format: "csv"
-    telemetry_interval_ms: -1
-    lora_device: "/tmp/ttyVH2"
-    lora_baud: 9600
-    arduino_id: "GPS02"
-    # arduino_device: "/tmp/ttyADR2"
+    # arduino_device: "/tmp/ttyADR1"
     arduino_device: "/dev/arduino"
     arduino_baud: 9600
+  # - id: "VH02"
+  #   wire_format: "csv"
+  #   telemetry_interval_ms: -1
+  #   lora_device: "/tmp/ttyVH2"
+  #   lora_baud: 9600
+  #   arduino_id: "GPS02"
+  #   arduino_device: "/tmp/ttyADR2"
+  #   arduino_baud: 9600
 
 arduinos:
-  - id: "AD01"
-    device: "/tmp/ttyADS1"
-    baud: 9600
+  # - id: "AD01"
+  #   device: "/tmp/ttyADS1"
+  #   baud: 9600
+  # - id: "AD02"
+  #   device: "/tmp/ttyADS2"
+  #   baud: 9600
 
 virtual_serials:
   enabled: true
@@ -61,15 +64,15 @@ virtual_serials:
     - type: "gateway-vehicle"
       left: "/tmp/ttyGW1"
       right: "/tmp/ttyVH1"
-    - type: "arduino-vehicle"
-      left: "/tmp/ttyADS1"
-      right: "/tmp/ttyADR1"
-    - type: "gateway-vehicle"
-      left: "/tmp/ttyGW2"
-      right: "/tmp/ttyVH2"
     # - type: "arduino-vehicle"
-    #   left: "/tmp/ttyGPSS2"
-    #   right: "/tmp/ttyGPSR2"
+    #   left: "/tmp/ttyADS1"
+    #   right: "/tmp/ttyADR1"
+    # - type: "gateway-vehicle"
+    #   left: "/tmp/ttyGW2"
+    #   right: "/tmp/ttyVH2"
+    # - type: "arduino-vehicle"
+    #   left: "/tmp/ttyADS2"
+    #   right: "/tmp/ttyADR2"
 # gpses:
 #   - id: "GPS01"
 #     device: "/tmp/ttyGPSS1"
