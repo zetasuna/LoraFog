@@ -214,7 +214,6 @@ func (v *Vehicle) sendTelemetry() {
 		TargetHead:  v.lastTelemetry.TargetHead,
 		LeftSpeed:   v.lastTelemetry.LeftSpeed,
 		RightSpeed:  v.lastTelemetry.RightSpeed,
-		PID:         1,
 	}
 	line, err := v.Parser.EncodeTelemetry(vd)
 	if err != nil {

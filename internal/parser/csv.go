@@ -19,17 +19,17 @@ func NewCSVParser() *CSVParser { return &CSVParser{} }
 
 // EncodeTelemetry converts VehicleData into CSV string.
 func (p *CSVParser) EncodeTelemetry(v model.VehicleData) (string, error) {
-	line := fmt.Sprintf("%s,%.6f,%.6f,%d,%d,%d,%d,%d",
-		v.VehicleID, v.Latitude, v.Longitude, v.CurrentHead, v.TargetHead, v.LeftSpeed, v.RightSpeed, v.PID)
+	line := fmt.Sprintf("%s,%.6f,%.6f,%d,%d,%d,%d",
+		v.VehicleID, v.Latitude, v.Longitude, v.CurrentHead, v.TargetHead, v.LeftSpeed, v.RightSpeed)
 	return line, nil
 }
 
 // DecodeTelemetry parses a CSV telemetry line into VehicleData struct.
 func (p *CSVParser) DecodeTelemetry(line string) (model.VehicleData, error) {
 	fields := strings.Split(strings.TrimSpace(line), ",")
-	if len(fields) != 8 {
-		return model.VehicleData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
-	}
+	// if len(fields) != 8 {
+	// 	return model.VehicleData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
+	// }
 
 	latitude, _ := strconv.ParseFloat(fields[1], 64)
 	longitude, _ := strconv.ParseFloat(fields[2], 64)
@@ -37,7 +37,7 @@ func (p *CSVParser) DecodeTelemetry(line string) (model.VehicleData, error) {
 	targetHead, _ := strconv.ParseFloat(fields[4], 64)
 	leftSpeed, _ := strconv.ParseFloat(fields[5], 64)
 	rightSpeed, _ := strconv.ParseFloat(fields[6], 64)
-	pid, _ := strconv.ParseFloat(fields[7], 64)
+	// pid, _ := strconv.ParseFloat(fields[7], 64)
 
 	return model.VehicleData{
 		VehicleID:   fields[0],
@@ -47,14 +47,14 @@ func (p *CSVParser) DecodeTelemetry(line string) (model.VehicleData, error) {
 		TargetHead:  int(targetHead),
 		LeftSpeed:   int(leftSpeed),
 		RightSpeed:  int(rightSpeed),
-		PID:         int(pid),
+		// PID:         int(pid),
 	}, nil
 }
 
 // EncodeControl converts a ControlData into CSV string.
 func (p *CSVParser) EncodeControl(c model.ControlData) (string, error) {
-	line := fmt.Sprintf("%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f",
-		c.VehicleID, c.Mode, c.Speed, c.Latitude, c.Longitude, c.Kp, c.Ki, c.Kd)
+	line := fmt.Sprintf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f",
+		c.VehicleID, c.Speed, c.Latitude, c.Longitude, c.Kp, c.Ki, c.Kd)
 	return line, nil
 }
 
@@ -65,7 +65,7 @@ func (p *CSVParser) DecodeControl(line string) (model.ControlData, error) {
 		return model.ControlData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
 	}
 
-	mode, _ := strconv.ParseFloat(fields[1], 64)
+	// mode, _ := strconv.ParseFloat(fields[1], 64)
 	speed, _ := strconv.ParseFloat(fields[2], 64)
 	latitude, _ := strconv.ParseFloat(fields[3], 64)
 	longitude, _ := strconv.ParseFloat(fields[4], 64)
@@ -75,7 +75,7 @@ func (p *CSVParser) DecodeControl(line string) (model.ControlData, error) {
 
 	return model.ControlData{
 		VehicleID: fields[0],
-		Mode:      int(mode),
+		// Mode:      int(mode),
 		Speed:     int(speed),
 		Latitude:  latitude,
 		Longitude: longitude,

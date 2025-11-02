@@ -24,14 +24,12 @@ type VehicleData struct {
 	TargetHead  int     `json:"target_head"`
 	LeftSpeed   int     `json:"left_speed"`
 	RightSpeed  int     `json:"right_speed"`
-	PID         int     `json:"pid"`
 }
 
 // ControlData represents a control command sent from Fog to a vehicle.
 // It can be encoded either as JSON or CSV depending on gateway configuration.
 type ControlData struct {
 	VehicleID string  `json:"vehicle_id"`
-	Mode      int     `json:"mode"`
 	Speed     int     `json:"speed"`
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`

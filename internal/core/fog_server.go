@@ -173,9 +173,15 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[fog] broadcast %s telemetry: %s", strings.ToUpper(f.wireFmt), out)
 
 	// Forward to App Server if enabled
+	payloadJSON, err := json.Marshal(vd)
+	if err != nil {
+		log.Printf("[fog] encode json err: %v", err)
+		http.Error(w, "encode error", http.StatusInternalServerError)
+		return
+	}
 	if f.AppAddr != "" {
 		go func(v model.VehicleData) {
-			resp, err := http.Post(f.AppAddr+"/api/telemetry", contentType, bytes.NewReader(payload))
+			resp, err := http.Post(f.AppAddr+"/api/telemetry", contentType, bytes.NewReader(payloadJSON))
 			if err != nil {
 				log.Printf("[fog] forward to app failed: %v", err)
 				return
