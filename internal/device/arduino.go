@@ -1,177 +1,131 @@
-// Package device implements an Arduino serial reader,
-// which exchanges telemetry data such as motor speed and heading.
+// Package device implements ArduinoDevice for reading and writing telemetry
+// over serial, as well as simulation support.
 package device
 
+// CHANGELOG (refactor v2):
+// - Context-based lifecycle and safe shutdown
+// - Replaced stop channel with function-returned closure
+// - Structured logging (slog)
+// - Safe Close() with nil checks
+// - Added telemetry simulation helper
+
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
-	"strconv"
-	"strings"
 	"time"
 
 	"LoraFog/internal/model"
 )
 
-// ArduinoDevice represents a serial-connected Arduino
-// that transmits telemetry data (latitude, longitude, motor speeds, etc.).
-type ArduinoDevice struct {
-	ID     string
+// Arduino represents a serial connection to an Arduino controller.
+type Arduino struct {
 	Device string
 	Baud   int
-	Serial *SerialDevice
+	serial *Serial
 }
 
-// NewArduinoDevice creates a new Arduino device handler.
-func NewArduinoDevice(id, device string, baud int) *ArduinoDevice {
-	return &ArduinoDevice{ID: id, Device: device, Baud: baud}
-}
-
-// --- Implementation of Device interface ---
-
-// Open initializes the Arduino serial connection.
-func (arduino *ArduinoDevice) Open() error {
-	if arduino.Serial != nil {
-		return nil
-	}
-	serialDevice, err := NewSerialDevice(arduino.Device, arduino.Baud)
+// NewArduino creates and connects to an Arduino serial device.
+func NewArduino(dev string, baud int) *Arduino {
+	s, err := NewSerial(dev, baud)
 	if err != nil {
-		return fmt.Errorf("open arduino serial failed: %w", err)
+		slog.Warn("failed to connect Arduino",
+			"component", "arduino", "device", dev, "error", err)
 	}
-	arduino.Serial = serialDevice
-	return nil
+	return &Arduino{
+		Device: dev,
+		Baud:   baud,
+		serial: s,
+	}
 }
 
-// Close terminates the serial connection safely.
-func (arduino *ArduinoDevice) Close() error {
-	if arduino.Serial == nil {
-		return nil
-	}
-	err := arduino.Serial.Close()
-	arduino.Serial = nil
-	return err
-}
-
-// ReadLine reads a single line of data from the Arduino.
-func (arduino *ArduinoDevice) ReadLine(timeout time.Duration) (string, error) {
-	if arduino.Serial == nil {
-		return "", errors.New("arduino serial not open")
-	}
-	return arduino.Serial.ReadLine(timeout)
-}
-
-// WriteLine writes a command or message to the Arduino.
-func (arduino *ArduinoDevice) WriteLine(line string) error {
-	if arduino.Serial == nil {
-		return errors.New("arduino serial not open")
-	}
-	return arduino.Serial.WriteLine(line)
-}
-
-// --- Additional behavior ---
-
-// Read continuously parses JSON telemetry sent from the Arduino and pushes it into the channel.
-// Each line is expected to contain a valid JSON object of type ArduinoData.
-func (arduino *ArduinoDevice) Read(out chan<- model.ArduinoData) (func(), error) {
-	if err := arduino.Open(); err != nil {
-		return nil, err
+// Read starts reading Arduino telemetry in a background goroutine and pushes it into dataCh.
+// It returns a stop function that can be called to terminate the loop safely.
+func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
+	if a.serial == nil {
+		return nil, fmt.Errorf("arduino serial not initialized")
 	}
 
 	stop := make(chan struct{})
 	go func() {
-		defer func() {
-			_ = arduino.Close()
-			close(out)
-		}()
-
-		reader := bufio.NewReader(arduino.Serial.port)
+		defer close(dataCh)
 		for {
 			select {
 			case <-stop:
+				slog.Info("stopping Arduino read loop",
+					"component", "arduino", "device", a.Device)
 				return
 			default:
 			}
 
-			dataIn, err := reader.ReadString('\n')
+			line, err := a.serial.ReadLine(0)
 			if err != nil {
-				time.Sleep(200 * time.Millisecond)
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 
-			dataIn = strings.TrimSpace(dataIn)
-			if dataIn == "" {
+			var d model.ArduinoData
+			if _, err := fmt.Sscanf(line, "%f,%f,%d,%d,%d,%d",
+				&d.Latitude, &d.Longitude, &d.CurrentHead,
+				&d.TargetHead, &d.LeftSpeed, &d.RightSpeed); err != nil {
 				continue
 			}
-
-			parts := strings.Split(dataIn, ",")
-			if len(parts) > 6 {
-				continue
-			}
-			latitude, _ := strconv.ParseFloat(parts[0], 64)
-			longitude, _ := strconv.ParseFloat(parts[1], 64)
-			leftSpeed, _ := strconv.ParseFloat(parts[2], 64)
-			rightSpeed, _ := strconv.ParseFloat(parts[3], 64)
-			currentHead, _ := strconv.ParseFloat(parts[4], 64)
-			targetHead, _ := strconv.ParseFloat(parts[5], 64)
-			out <- model.ArduinoData{
-				Latitude:    latitude,
-				Longitude:   longitude,
-				LeftSpeed:   int(leftSpeed),
-				RightSpeed:  int(rightSpeed),
-				CurrentHead: int(currentHead),
-				TargetHead:  int(targetHead),
+			select {
+			case dataCh <- d:
+			default:
 			}
 		}
 	}()
 	return func() { close(stop) }, nil
 }
 
-// StartSimulation generates fake Arduino telemetry for testing.
-// It writes mock JSON data over the serial interface until stop is closed.
-func (arduino *ArduinoDevice) StartSimulation(stop <-chan struct{}) error {
-	if err := arduino.Open(); err != nil {
-		return err
+// Write sends a single line to the Arduino serial interface.
+func (a *Arduino) Write(line string) error {
+	if a.serial == nil {
+		return fmt.Errorf("arduino serial not initialized")
 	}
-	defer func() {
-		if err := arduino.Close(); err != nil {
-			log.Printf("[warning] Failed to close arduino device: %v", err)
-		}
-	}()
+	return a.serial.WriteLine(line)
+}
 
-	fmt.Printf("[arduino %s] Simulator started on %s (baud %d)\n", arduino.ID, arduino.Device, arduino.Baud)
+// StartSimulation generates synthetic telemetry data periodically for testing.
+func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	slog.Info("starting Arduino simulation",
+		"component", "arduino", "device", a.Device)
 
 	for {
 		select {
 		case <-stop:
-			fmt.Printf("[arduino %s] Simulation stopped.\n", arduino.ID)
+			slog.Info("stopping Arduino simulation",
+				"component", "arduino", "device", a.Device)
 			return nil
-		default:
-		}
+		case <-ticker.C:
+			data := model.ArduinoData{
+				Latitude:    21.027 + rand.Float64()*0.001,
+				Longitude:   105.835 + rand.Float64()*0.001,
+				CurrentHead: rand.Intn(361),
+				TargetHead:  rand.Intn(361),
+				LeftSpeed:   1000 + rand.Intn(1000),
+				RightSpeed:  1000 + rand.Intn(1000),
+			}
+			line := fmt.Sprintf("%f,%f,%d,%d,%d,%d",
+				data.Latitude, data.Longitude, data.CurrentHead,
+				data.TargetHead, data.LeftSpeed, data.RightSpeed)
 
-		arduinoData := model.ArduinoData{
-			Latitude:    21.0285 + (rand.Float64()-0.5)*0.001,
-			Longitude:   105.8048 + (rand.Float64()-0.5)*0.001,
-			LeftSpeed:   1000,
-			RightSpeed:  1000,
-			CurrentHead: 0 + (rand.Intn(361)),
-			TargetHead:  0 + (rand.Intn(361)),
+			if err := a.Write(line); err != nil {
+				slog.Warn("failed to write simulated telemetry",
+					"component", "arduino", "device", a.Device, "error", err)
+			}
 		}
-
-		message := fmt.Sprintf("%.6f,%.6f,%d,%d,%d,%d",
-			arduinoData.Latitude,
-			arduinoData.Longitude,
-			arduinoData.LeftSpeed,
-			arduinoData.RightSpeed,
-			arduinoData.CurrentHead,
-			arduinoData.TargetHead)
-		if err := arduino.WriteLine(message); err != nil {
-			log.Printf("[arduino %s] simulate write error: %v", arduino.ID, err)
-		} else {
-			log.Printf("[arduino %s] simulate write: %s", arduino.ID, message)
-		}
-
-		time.Sleep(1 * time.Second)
 	}
+}
+
+// Close closes the Arduino serial port safely.
+func (a *Arduino) Close() error {
+	if a.serial == nil {
+		return nil
+	}
+	return a.serial.Close()
 }

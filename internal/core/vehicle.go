@@ -1,257 +1,277 @@
+// Package core implements the Vehicle agent responsible for collecting telemetry
+// from Arduino devices and sending CBOR-encoded data via LoRa.
 package core
 
+// CHANGELOG (refactor v2):
+// - Removed parser dependency
+// - Vehicle<->Gateway uses CBOR serialization
+// - Context-based lifecycle management
+// - Structured logging (slog)
+// - Renamed methods to Start / Shutdown for consistency
+// - Safe Close and consistent log keys
+
 import (
+	"context"
 	"fmt"
-	"log"
-	"strings"
+	"log/slog"
 	"sync"
 	"time"
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
+	"LoraFog/internal/util"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
-// Vehicle represents a vehicle agent that reads telemetry and periodically
-// sends telemetry via an underlying Device (e.g., LoRa serial).
+// Vehicle represents a single autonomous vehicle communicating via LoRa.
 type Vehicle struct {
-	ID            string
-	Device        device.Device
-	ArduinoDevice *device.ArduinoDevice
-	Parser        parser.Parser
-	Interval      time.Duration
+	ID          string
+	lora        *device.Lora
+	arduino     *device.Arduino
+	sessionKey  []byte
+	leaseExpiry time.Time
 
-	stop          chan struct{}
-	wg            sync.WaitGroup
-	lastTelemetry model.ArduinoData
-	lastUpdate    time.Time
-	arduinoFn     func()
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// NewVehicle constructs a Vehicle with given identifiers, device paths and parser.
-func NewVehicle(id, loraDev string, loraBaud int, arduinoID string, arduinoDev string, arduinoBaud int, interval time.Duration, p parser.Parser) *Vehicle {
-	dev, _ := device.NewSerialDevice(loraDev, loraBaud)
-	v := &Vehicle{ID: id, Device: dev, Parser: p, Interval: interval, stop: make(chan struct{})}
+// NewVehicle constructs a Vehicle agent with LoRa and optional Arduino connection.
+func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud int) *Vehicle {
+	lora := device.NewLora(loraDev, loraBaud)
+	v := &Vehicle{
+		ID:   id,
+		lora: lora,
+	}
 	if arduinoDev != "" {
-		v.ArduinoDevice = device.NewArduinoDevice(arduinoID, arduinoDev, arduinoBaud)
+		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
 	}
 	return v
 }
 
-// Start initializes the vehicle data acquisition and telemetry loop.
-// It starts reading Arduino data and immediately sends telemetry upon new data arrival.
-// Optionally, it may still include a periodic heartbeat if needed.
-func (v *Vehicle) Start() error {
-	// --- 1. Start Arduino telemetry reader ---
-	if v.ArduinoDevice != nil {
-		ch := make(chan model.ArduinoData, 5)
+// Start begins the vehicle telemetry and control loops.
+func (v *Vehicle) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	v.cancel = cancel
 
-		// Start reading Arduino asynchronously
-		stop, err := v.ArduinoDevice.Read(ch)
+	// --- Arduino telemetry reader ---
+	if v.arduino != nil {
+		dataCh := make(chan model.ArduinoData, 5)
+		stop, err := v.arduino.Read(dataCh)
 		if err != nil {
-			log.Printf("[vehicle %s] Arduino start err: %v", v.ID, err)
+			slog.Warn("failed to start Arduino reader",
+				"component", "vehicle", "id", v.ID, "error", err)
 		} else {
-			log.Printf("[vehicle %s] Arduino start: success", v.ID)
-			v.arduinoFn = stop
+			slog.Info("Arduino telemetry reader started",
+				"component", "vehicle", "id", v.ID)
 			v.wg.Add(1)
 			go func() {
 				defer v.wg.Done()
 				for {
 					select {
-					case <-v.stop:
-						log.Printf("[vehicle %s] Stopping Arduino loop", v.ID)
+					case <-ctx.Done():
+						slog.Info("stopping Arduino telemetry loop",
+							"component", "vehicle", "id", v.ID)
 						return
-					case arduinoData, ok := <-ch:
+					case data, ok := <-dataCh:
 						if !ok {
-							log.Printf("[vehicle %s] Arduino channel closed", v.ID)
+							slog.Info("Arduino telemetry channel closed",
+								"component", "vehicle", "id", v.ID)
 							return
 						}
-						// Update last Arduino reading
-						log.Printf("[vehicle %s] received telemetry", v.ID)
-						v.lastTelemetry = arduinoData
-						v.lastUpdate = time.Now()
-						v.sendTelemetry()
-						log.Printf("[vehicle %s] sended telemetry", v.ID)
+						v.sendTelemetry(data)
 					}
 				}
+			}()
+			v.wg.Add(1)
+			go func() {
+				defer v.wg.Done()
+				<-ctx.Done()
+				stop()
 			}()
 		}
 	}
 
-	// heartbeat ticker – periodic "alive" message
-	if v.Interval > 0 {
-		v.wg.Add(1)
-		go func() {
-			defer v.wg.Done()
-			ticker := time.NewTicker(v.Interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-v.stop:
-					log.Printf("[vehicle %s] stopping heartbeat", v.ID)
-					return
-				case <-ticker.C:
-					// Only send heartbeat if no Arduino data for a while
-					if time.Since(v.lastUpdate) > v.Interval {
-						log.Printf("[vehicle %s] sending heartbeat", v.ID)
-						v.sendTelemetry()
-					}
-				}
-			}
-		}()
-	}
-
-	// --- 2. Start LoRa control listener ---
-	if v.Device != nil && v.ArduinoDevice != nil {
+	// --- LoRa control listener ---
+	if v.lora != nil && v.arduino != nil {
 		v.wg.Add(1)
 		go func() {
 			defer v.wg.Done()
 			for {
 				select {
-				case <-v.stop:
-					log.Printf("[vehicle %s] stopping LoRa control listener", v.ID)
+				case <-ctx.Done():
+					slog.Info("stopping LoRa control listener",
+						"component", "vehicle", "id", v.ID)
 					return
 				default:
 				}
 
-				dataIn, err := v.Device.ReadLine(0)
+				frame, err := v.lora.ReadFrame()
 				if err != nil {
 					time.Sleep(200 * time.Millisecond)
 					continue
 				}
 
-				dataIn = strings.TrimSpace(dataIn)
-				if dataIn == "" {
+				var ctl model.ControlData
+				if err := cbor.Unmarshal(frame, &ctl); err != nil {
+					slog.Warn("invalid control CBOR packet",
+						"component", "vehicle", "id", v.ID, "error", err)
+					continue
+				}
+				if ctl.VehicleID != v.ID {
+					slog.Warn("control ignored (wrong target)",
+						"component", "vehicle", "id", v.ID, "target", ctl.VehicleID)
 					continue
 				}
 
-				// Parse control packet
-				control, err := v.Parser.DecodeControl(dataIn)
-				if err != nil {
-					log.Printf("[vehicle %s] invalid control packet: %v (%s)", v.ID, err, dataIn)
-					continue
-				}
-				if control.VehicleID != v.ID {
-					log.Printf("[vehicle %s] Reject control: %s", v.ID, dataIn)
-					continue
+				out := fmt.Sprintf("%d,%.6f,%.6f,%.3f,%.3f,%.3f",
+					ctl.Speed, ctl.Latitude, ctl.Longitude, ctl.Kp, ctl.Ki, ctl.Kd)
+				if err := v.arduino.Write(out); err != nil {
+					slog.Warn("failed to forward control to Arduino",
+						"component", "vehicle", "id", v.ID, "error", err)
 				} else {
-					log.Printf("[vehicle %s] Receive control packet: %s", v.ID, dataIn)
-				}
-
-				// targetHead := int(calculateBearing(v.lastTelemetry.Latitude,v.lastTelemetry.Longitude,control.Latitude,control.Longitude))
-				arduinoControl := model.ArduinoControl{
-					CruiseSpeed: control.Speed,
-					Latitude:    control.Latitude,
-					Longitude:   control.Longitude,
-					Kp:          control.Kp,
-					Ki:          control.Ki,
-					Kd:          control.Kd,
-				}
-				dataOut := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
-					arduinoControl.CruiseSpeed,
-					arduinoControl.Latitude,
-					arduinoControl.Longitude,
-					arduinoControl.Kp,
-					arduinoControl.Ki,
-					arduinoControl.Kd,
-				)
-
-				// Forward control data to Arduino
-				if err := v.ArduinoDevice.WriteLine(dataOut); err != nil {
-					log.Printf("[vehicle %s] failed to forward control to Arduino: %v", v.ID, err)
-				} else {
-					log.Printf("[vehicle %s] forwarded control to Arduino: %s", v.ID, dataOut)
+					slog.Info("control forwarded to Arduino",
+						"component", "vehicle", "id", v.ID)
 				}
 			}
 		}()
 	}
 
+	// start beacon listener (reads frames and handles beacon/ auth)
+	v.wg.Add(1)
+	go func() {
+		defer v.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			frame, err := v.lora.ReadFrameWithTimeout(10 * time.Second)
+			if err != nil {
+				// timeout is normal
+				continue
+			}
+			// try to detect message type
+			var generic map[string]any
+			if err := cbor.Unmarshal(frame, &generic); err != nil {
+				slog.Warn("invalid cbor frame", "component", "vehicle", "id", v.ID, "error", err)
+				continue
+			}
+			if t, ok := generic["type"].(string); ok {
+				switch t {
+				case "beacon":
+					// respond with hello
+					var b model.BeaconMessage
+					_ = cbor.Unmarshal(frame, &b)
+					hello := model.HelloMessage{VehicleID: v.ID}
+					hb, _ := cbor.Marshal(hello)
+					_ = v.lora.WriteFrame(hb)
+					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.GatewayID)
+				case "auth":
+					// receive auth (key)
+					var a model.AuthMessage
+					_ = cbor.Unmarshal(frame, &a)
+					// v.sessionKey = a.Key
+					v.leaseExpiry = time.Now().Add(time.Duration(a.TTL) * time.Second)
+					slog.Info("received auth and stored session key", "component", "vehicle", "id", v.ID, "ttl", a.TTL)
+				default:
+					// other types ignored here
+				}
+			}
+		}
+	}()
+
+	// renew loop: if we have a key, periodically send a light "renew" (or telemetry) to keep lease alive
+	v.wg.Add(1)
+	go func() {
+		defer v.wg.Done()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if v.sessionKey != nil && time.Now().Before(v.leaseExpiry) {
+					// send a short renew packet (could be telemetry too)
+					msg := map[string]any{"type": "renew", "vehicle_id": v.ID}
+					b, _ := cbor.Marshal(msg)
+					_ = v.lora.WriteFrame(b)
+					slog.Debug("sent renew", "component", "vehicle", "id", v.ID)
+				} else if v.sessionKey != nil && time.Now().After(v.leaseExpiry) {
+					// lease expired locally: drop key
+					v.sessionKey = nil
+					slog.Info("session expired locally, dropped key", "component", "vehicle", "id", v.ID)
+				}
+			}
+		}
+	}()
+
 	return nil
 }
 
-// Stop stops the vehicle goroutines, Arduino provider and closes the device.
-func (v *Vehicle) Stop() {
-	// close stop channel (idempotent)
-	select {
-	case <-v.stop:
-		// already closed
-	default:
-		close(v.stop)
+// Shutdown stops all goroutines and closes devices safely.
+func (v *Vehicle) Shutdown() {
+	if v.cancel != nil {
+		v.cancel()
 	}
-	if v.arduinoFn != nil {
-		v.arduinoFn()
+	if v.lora != nil {
+		if err := v.lora.Close(); err != nil {
+			slog.Warn("failed to close LoRa device",
+				"component", "vehicle", "id", v.ID, "error", err)
+		}
 	}
-
+	if v.arduino != nil {
+		if err := v.arduino.Close(); err != nil {
+			slog.Warn("failed to close Arduino device",
+				"component", "vehicle", "id", v.ID, "error", err)
+		}
+	}
 	v.wg.Wait()
-
-	// close LoRa serial
-	if v.Device != nil {
-		if err := v.Device.Close(); err != nil {
-			log.Printf("[vehicle %s] device close err: %v", v.ID, err)
-		}
-	}
-
-	// close Arduino serial
-	if v.ArduinoDevice != nil {
-		if err := v.ArduinoDevice.Close(); err != nil {
-			log.Printf("[vehicle %s] arduino close err: %v", v.ID, err)
-		}
-	}
+	slog.Info("vehicle stopped", "component", "vehicle", "id", v.ID)
 }
 
-// sendTelemetry builds a VehicleData from last data/fallback values and writes it to the Device.
-func (v *Vehicle) sendTelemetry() {
-	latitude, longitude := v.lastTelemetry.Latitude, v.lastTelemetry.Longitude
-	if latitude == 0 && longitude == 0 {
-		// fallback coordinate (Hanoi)
-		latitude, longitude = 21.0285, 105.8048
-	}
-	vd := model.VehicleData{
+// sendTelemetry encodes Arduino telemetry as CBOR and writes it via LoRa.
+func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
+	data := model.VehicleData{
 		VehicleID:   v.ID,
-		Latitude:    latitude,
-		Longitude:   longitude,
-		CurrentHead: v.lastTelemetry.CurrentHead,
-		TargetHead:  v.lastTelemetry.TargetHead,
-		LeftSpeed:   v.lastTelemetry.LeftSpeed,
-		RightSpeed:  v.lastTelemetry.RightSpeed,
-		PID:         1,
+		Latitude:    a.Latitude,
+		Longitude:   a.Longitude,
+		CurrentHead: a.CurrentHead,
+		TargetHead:  a.TargetHead,
+		LeftSpeed:   a.LeftSpeed,
+		RightSpeed:  a.RightSpeed,
 	}
-	line, err := v.Parser.EncodeTelemetry(vd)
+
+	payload, err := cbor.Marshal(data)
 	if err != nil {
-		log.Printf("[vehicle %s] encode telemetry err: %v", v.ID, err)
+		slog.Warn("failed to encode telemetry CBOR",
+			"component", "vehicle", "id", v.ID, "error", err)
 		return
-	} else {
-		log.Printf("[vehicle %s] encode telemetry: %s", v.ID, line)
 	}
-	if v.Device != nil {
-		if err := v.Device.WriteLine(line); err == nil {
-			log.Printf("[vehicle %s] sent telemetry: %s", v.ID, line)
+	if v.lora != nil {
+		if v.sessionKey != nil {
+			frame, err := util.BuildFrame(payload)
+			if err != nil {
+				slog.Warn("build frame failed", "component", "vehicle", "id", v.ID, "error", err)
+				return
+			}
+			if err := v.lora.WriteBytes(frame); err != nil {
+				slog.Warn("failed to send telemetry",
+					"component", "vehicle", "id", v.ID, "error", err)
+			} else {
+				slog.Debug("telemetry sent",
+					"component", "vehicle", "id", v.ID)
+			}
 		} else {
-			log.Printf("[vehicle %s] lora write err: %v", v.ID, err)
+			if err := v.lora.WriteFrame(payload); err != nil {
+				slog.Warn("failed to send telemetry",
+					"component", "vehicle", "id", v.ID, "error", err)
+			} else {
+				slog.Debug("telemetry sent",
+					"component", "vehicle", "id", v.ID)
+			}
 		}
-	} else {
-		log.Printf("[vehicle %s] device absent; telemetry not sent", v.ID)
 	}
 }
-
-// func calculateBearing(currentLatitude, currentLongitude, targetLatitude, targetLongitude float64) float64 {
-// 	// Convert degrees to radians
-// 	currentLatitudeRadian := currentLatitude * math.Pi / 180.0
-// 	currentLongitudeRadian := currentLongitude * math.Pi / 180.0
-// 	targetLatitudeRadian := targetLatitude * math.Pi / 180.0
-// 	targetLongitudeRadian := targetLongitude * math.Pi / 180.0
-//
-// 	// Calculate difference in longitude
-// 	deltaLongitude := targetLongitudeRadian - currentLongitudeRadian
-//
-// 	// Bearing formula
-// 	y := math.Sin(deltaLongitude) * math.Cos(targetLatitudeRadian)
-// 	x := math.Cos(currentLatitudeRadian)*math.Sin(targetLatitudeRadian) - math.Sin(currentLatitudeRadian)*math.Cos(targetLatitudeRadian)*math.Cos(deltaLongitude)
-//
-// 	bearing := math.Atan2(y, x) * 180.0 / math.Pi
-//
-// 	// Normalize to [0, 360)
-// 	bearing = math.Mod(bearing+360.0, 360.0)
-//
-// 	return bearing
-// }

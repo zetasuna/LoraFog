@@ -1,83 +1,54 @@
-global:
-  wire_format: "csv"
+# LoraFog Configuration v2 (CBOR/JSON refactor)
+# Compatible with Go 1.24 and refactored system architecture
 
 server:
-  fog_addr: "http://127.0.0.1:10000"
-  app_addr: "http://127.0.0.1:3001"
+  address: "127.0.0.1:10000"
+  app_address: "127.0.0.1:3001"
+
   gateway_registry:
     - id: "GW01"
-      url: "http://127.0.0.1:10001"
-      vehicles: ["VH01"]
-    # - id: "GW02"
-    #   url: "http://127.0.0.1:10002"
-    #   vehicles: ["VH02"]
+      address: "127.0.0.1:10001"
+    - id: "GW02"
+      address: "127.0.0.1:10002"
 
 gateways:
   - id: "GW01"
-    url: "http://127.0.0.1:10001"
-    fog_url: "http://127.0.0.1:10000"
-    wire_in: "csv" # format nhận từ vehicle
-    wire_out: "json" # format gửi lên fog
+    address: "127.0.0.1:10001"
+    server_address: "127.0.0.1:10000"
     lora_device: "/tmp/ttyGW1"
-    # lora_device: "/dev/lora"
     lora_baud: 9600
-    vehicles: ["VH01"]
-  # - id: "GW02"
-  #   url: "http://127.0.0.1:10002"
-  #   fog_url: "http://127.0.0.1:10000"
-  #   wire_in: "csv" # format nhận từ vehicle
-  #   wire_out: "csv" # format gửi lên fog
-  #   lora_device: "/tmp/ttyGW2"
-  #   lora_baud: 9600
-  #   vehicles: ["VH02"]
+
+  - id: "GW02"
+    address: "127.0.0.1:10002"
+    server_address: "127.0.0.1:10000"
+    lora_device: "/tmp/ttyGW2"
+    lora_baud: 9600
 
 vehicles:
   - id: "VH01"
-    wire_format: "csv"
-    telemetry_interval_ms: -1
     lora_device: "/tmp/ttyVH1"
     lora_baud: 9600
-    arduino_id: "GPS01"
-    # arduino_device: "/tmp/ttyADR1"
-    arduino_device: "/dev/arduino"
+    arduino_device: "/tmp/ttyADR1"
     arduino_baud: 9600
-  # - id: "VH02"
-  #   wire_format: "csv"
-  #   telemetry_interval_ms: -1
-  #   lora_device: "/tmp/ttyVH2"
-  #   lora_baud: 9600
-  #   arduino_id: "GPS02"
-  #   arduino_device: "/tmp/ttyADR2"
-  #   arduino_baud: 9600
+
+  - id: "VH02"
+    lora_device: "/tmp/ttyVH2"
+    lora_baud: 9600
+    arduino_device: "/tmp/ttyADR2"
+    arduino_baud: 9600
 
 arduinos:
-  # - id: "AD01"
-  #   device: "/tmp/ttyADS1"
-  #   baud: 9600
-  # - id: "AD02"
-  #   device: "/tmp/ttyADS2"
-  #   baud: 9600
+  - device: "/tmp/ttyADS1"
+    baud: 9600
+  - device: "/tmp/ttyADS2"
+    baud: 9600
 
 virtual_serials:
-  enabled: true
-  pairs:
-    - type: "gateway-vehicle"
-      left: "/tmp/ttyGW1"
-      right: "/tmp/ttyVH1"
-    # - type: "arduino-vehicle"
-    #   left: "/tmp/ttyADS1"
-    #   right: "/tmp/ttyADR1"
-    # - type: "gateway-vehicle"
-    #   left: "/tmp/ttyGW2"
-    #   right: "/tmp/ttyVH2"
-    # - type: "arduino-vehicle"
-    #   left: "/tmp/ttyADS2"
-    #   right: "/tmp/ttyADR2"
-# gpses:
-#   - id: "GPS01"
-#     device: "/tmp/ttyGPSS1"
-#     baud: 9600
-#   - id: "GPS02"
-#     device: "/tmp/ttyGPSS2"
-#     baud: 9600
-
+  - left: "/tmp/ttyGW1"
+    right: "/tmp/ttyVH1"
+  - left: "/tmp/ttyADS1"
+    right: "/tmp/ttyADR1"
+  - left: "/tmp/ttyGW2"
+    right: "/tmp/ttyVH2"
+  - left: "/tmp/ttyADS2"
+    right: "/tmp/ttyADR2"

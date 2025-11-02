@@ -1,16 +1,23 @@
-// Package util provides utility functions for setting up application-wide logging,
-// including timestamped logs with file and line information.
+// Package util provides small utilities used by the system.
 package util
 
+// CHANGELOG (refactor v2):
+// - Centralized slog setup for structured logging
+// - Exported SetupLogger for callers to initialize global log behavior
+
 import (
-	"log"
+	"log/slog"
 	"os"
 )
 
-// SetupLogger configures the standard logger with timestamp and short file info.
-// It writes logs to stdout.
+// SetupLogger configures the global slog logger.
+// Call once in main prior to starting System.
 func SetupLogger() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("[Logger] Initialized")
+	// Use default handler (console) but include time and source.
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: true,
+	})
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	slog.Info("logger initialized", "component", "util")
 }

@@ -1,84 +1,105 @@
-// Package model defines shared configuration structures used to initialize the LoraFog system.
-// It includes global settings, gateway definitions, and vehicle definitions.
+// Package model defines configuration and message structures used across LoraFog.
 package model
 
-// Config represents the root structure loaded from configs/config.yml.
-// It contains global settings, gateway definitions and vehicle definitions.
+// CHANGELOG (refactor v2):
+// - Added JSON and CBOR tags to all serializable structs
+// - Consolidated config structs and added Validate() for config validation
+// - Clarified naming and godoc comments
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Config is the root configuration structure for the system.
 type Config struct {
-	Global         GlobalConfig        `yaml:"global"`
-	Server         ServerConfig        `yaml:"server"`
-	Gateways       []GatewayConfig     `yaml:"gateways"`
-	Vehicles       []VehicleConfig     `yaml:"vehicles"`
-	Arduinos       []ArduinoConfig     `yaml:"arduinos"`
-	VirtualSerials VirtualSerialConfig `yaml:"virtual_serials"`
+	Server         ServerConfig          `yaml:"server" json:"server" cbor:"server"`
+	Gateways       []GatewayConfig       `yaml:"gateways" json:"gateways" cbor:"gateways"`
+	Vehicles       []VehicleConfig       `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
+	Arduinos       []ArduinoConfig       `yaml:"arduinos" json:"arduinos" cbor:"arduinos"`
+	VirtualSerials []VirtualSerialConfig `yaml:"virtual_serials" json:"virtual_serials" cbor:"virtual_serials"`
 }
 
-// GlobalConfig defines shared defaults across the system.
-type GlobalConfig struct {
-	WireFormat string `yaml:"wire_format"` // default wire format (csv/json)
-}
-
-// ServerConfig defines configuration for a server instance.
+// ServerConfig configures the fog server and app forwarder.
 type ServerConfig struct {
-	FogAddr  string            `yaml:"fog_addr"` // address for FogServer (e.g. ":10000") if blank server will not work
-	AppAddr  string            `yaml:"app_addr"` // address for FogServer (e.g. ":10000") if blank server will not work
-	Gateways []GatewayRegistry `yaml:"gateway_registry"`
+	Addr     string            `yaml:"address" json:"address" cbor:"address"`
+	AppAddr  string            `yaml:"app_address" json:"app_address" cbor:"app_address"`
+	Gateways []GatewayRegistry `yaml:"gateway_registry" json:"gateway_registry" cbor:"gateway_registry"`
 }
 
-// GatewayRegistry defines a gateway registration entry.
+// GatewayRegistry is used to register gateways to the fog server on startup.
 type GatewayRegistry struct {
-	ID       string   `yaml:"id"`
-	URL      string   `yaml:"url"`
-	Vehicles []string `yaml:"vehicles"`
+	ID   string `yaml:"id" json:"id" cbor:"id"`
+	Addr string `yaml:"address" json:"address" cbor:"address"`
+	// Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
 }
 
-// GatewayConfig defines configuration for a single gateway instance.
+// GatewayConfig config for a Gateway instance.
 type GatewayConfig struct {
-	ID       string   `yaml:"id"`
-	URL      string   `yaml:"url"`     // fog server endpoint
-	FogURL   string   `yaml:"fog_url"` // fog server endpoint
-	LoraDev  string   `yaml:"lora_device"`
-	LoraBaud int      `yaml:"lora_baud"`
-	WireIn   string   `yaml:"wire_in"`  // format received from vehicle
-	WireOut  string   `yaml:"wire_out"` // format sent to fog
-	Vehicles []string `yaml:"vehicles"`
+	ID         string `yaml:"id" json:"id" cbor:"id"`
+	Addr       string `yaml:"address" json:"address" cbor:"address"`
+	ServerAddr string `yaml:"server_address" json:"server_address" cbor:"server_address"`
+	LoraDev    string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
+	LoraBaud   int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
 }
 
-// VehicleConfig defines configuration for a single vehicle agent.
+// VehicleConfig config for a Vehicle agent.
 type VehicleConfig struct {
-	ID                  string `yaml:"id"`
-	WireFormat          string `yaml:"wire_format"`
-	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms"`
-	LoraDev             string `yaml:"lora_device"`
-	LoraBaud            int    `yaml:"lora_baud"`
-	ArduinoID           string `yaml:"arduino_id"`
-	ArduinoDev          string `yaml:"arduino_device"`
-	ArduinoBaud         int    `yaml:"arduino_baud"`
+	ID          string `yaml:"id" json:"id" cbor:"id"`
+	LoraDev     string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
+	LoraBaud    int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
+	ArduinoDev  string `yaml:"arduino_device" json:"arduino_device" cbor:"arduino_device"`
+	ArduinoBaud int    `yaml:"arduino_baud" json:"arduino_baud" cbor:"arduino_baud"`
 }
 
-// ArduinoConfig defines serial setup for testing
+// ArduinoConfig defines a serial Arduino connection.
 type ArduinoConfig struct {
-	ID   string `yaml:"id"`
-	Dev  string `yaml:"device"`
-	Baud int    `yaml:"baud"`
+	Dev  string `yaml:"device" json:"device" cbor:"device"`
+	Baud int    `yaml:"baud" json:"baud" cbor:"baud"`
 }
 
-// GpsConfig defines serial setup for testing
-type GpsConfig struct {
-	ID   string `yaml:"id"`
-	Dev  string `yaml:"device"`
-	Baud int    `yaml:"baud"`
-}
-
-// VirtualPair defines a flexible pair of linked virtual serial endpoints.
-type VirtualPair struct {
-	Type  string `yaml:"type"`
-	Left  string `yaml:"left"`
-	Right string `yaml:"right"`
-}
-
-// VirtualSerialConfig defines optional virtual serial setup for testing.
+// VirtualSerialConfig defines a pair of linked virtual serial endpoints.
 type VirtualSerialConfig struct {
-	Enabled bool          `yaml:"enabled"`
-	Pairs   []VirtualPair `yaml:"pairs"`
+	Left  string `yaml:"left" json:"left" cbor:"left"`
+	Right string `yaml:"right" json:"right" cbor:"right"`
+}
+
+// Validate checks the configuration for basic correctness.
+// It returns an error describing the first problem found.
+func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("config is nil")
+	}
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no server configured")
+	}
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no gateways configured")
+	}
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no vehicles configured")
+	}
+	ids := map[string]struct{}{}
+	for i, gw := range c.Gateways {
+		if gw.ID == "" {
+			return fmt.Errorf("gateways[%d]: id is empty", i)
+		}
+		if gw.Addr == "" {
+			return fmt.Errorf("gateways[%d]: address is empty", i)
+		}
+		if gw.ServerAddr == "" {
+			return fmt.Errorf("gateways[%d]: server_address is empty", i)
+		}
+		if _, ok := ids[gw.ID]; ok {
+			return fmt.Errorf("duplicate id in gateways: %s", gw.ID)
+		}
+		ids[gw.ID] = struct{}{}
+	}
+	// Validate vehicles
+	for i, v := range c.Vehicles {
+		if v.ID == "" {
+			return fmt.Errorf("vehicles[%d]: id is empty", i)
+		}
+	}
+	return nil
 }

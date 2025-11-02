@@ -1,94 +1,131 @@
-// Package device implements SerialDevice using go.bug.st/serial,
-// which provides real serial communication support for devices like LoRa or sensors.
+// Package device implements a simple wrapper for serial communication.
+// It provides non-blocking read/write methods with optional timeout.
 package device
+
+// CHANGELOG (refactor v2):
+// - Safe read/write with timeout
+// - Added context support via external control
+// - Structured logging (slog)
+// - Safe Close() checks and standardized naming
 
 import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"sync"
 	"time"
 
-	serial "go.bug.st/serial"
+	"go.bug.st/serial"
 )
 
-// SerialDevice implements Device using go.bug.st/serial.
-type SerialDevice struct {
-	port serial.Port
-	r    *bufio.Reader
-	dev  string
-	baud int
+// Serial represents a simple serial port connection.
+type Serial struct {
+	Port     serial.Port
+	Path     string
+	BaudRate int
+	mu       sync.Mutex
+	reader   *bufio.Reader
 }
 
-// NewSerialDevice creates and opens a serial device with the given path and baudrate.
-func NewSerialDevice(dev string, baud int) (*SerialDevice, error) {
-	p, err := serial.Open(dev, &serial.Mode{BaudRate: baud})
+// NewSerial opens a serial port with the given path and baud rate.
+func NewSerial(path string, baud int) (*Serial, error) {
+	mode := &serial.Mode{BaudRate: baud}
+	port, err := serial.Open(path, mode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open serial %s: %w", dev, err)
+		return nil, fmt.Errorf("open serial port %s: %w", path, err)
 	}
-	return &SerialDevice{port: p, r: bufio.NewReader(p), dev: dev, baud: baud}, nil
+	s := &Serial{
+		Port:     port,
+		Path:     path,
+		BaudRate: baud,
+		reader:   bufio.NewReader(port),
+	}
+	slog.Info("serial port opened",
+		"component", "serial", "path", path, "baud", baud)
+	return s, nil
 }
 
-// Open ensures that the serial port is ready for use.
-func (s *SerialDevice) Open() error {
-	if s.port != nil {
-		return nil
+// ReadLine reads a line of data with an optional timeout (in milliseconds).
+func (s *Serial) ReadLine(timeoutMs int) (string, error) {
+	if s.Port == nil {
+		return "", errors.New("serial port not initialized")
 	}
-	p, err := serial.Open(s.dev, &serial.Mode{BaudRate: s.baud})
+
+	if timeoutMs > 0 {
+		if err := s.Port.SetReadTimeout(time.Duration(timeoutMs) * time.Millisecond); err != nil {
+			slog.Warn("failed to set read timeout",
+				"component", "serial", "path", s.Path, "error", err)
+		}
+	}
+
+	line, err := s.reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("reopen serial %s failed: %w", s.dev, err)
+		return "", err
 	}
-	s.port = p
-	s.r = bufio.NewReader(p)
+	return line, nil
+}
+
+// WriteLine writes a single line (with newline terminator) to the serial port.
+func (s *Serial) WriteLine(data string) error {
+	if s.Port == nil {
+		return errors.New("serial port not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.Port.Write([]byte(data + "\n")); err != nil {
+		slog.Warn("failed to write to serial",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
+	}
 	return nil
 }
 
-// Close closes the underlying serial connection.
-func (s *SerialDevice) Close() error {
-	if s.port == nil {
+// ReadBytes reads exactly n bytes from the serial port.
+// It blocks until all bytes are received or an error occurs.
+func (s *Serial) ReadBytes(n int) ([]byte, error) {
+	if s.Port == nil {
+		return nil, errors.New("serial port not initialized")
+	}
+	buf := make([]byte, n)
+	total := 0
+	for total < n {
+		readCount, err := io.ReadFull(s.reader, buf[total:])
+		total += readCount
+		if err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+// WriteBytes writes raw binary data to the serial port without newline.
+func (s *Serial) WriteBytes(b []byte) error {
+	if s.Port == nil {
+		return errors.New("serial port not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.Port.Write(b); err != nil {
+		slog.Warn("failed to write bytes to serial",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
+	}
+	return nil
+}
+
+// Close closes the serial port safely.
+func (s *Serial) Close() error {
+	if s.Port == nil {
 		return nil
 	}
-	err := s.port.Close()
-	s.port = nil
-	return err
-}
-
-// ReadLine reads a single line from the serial port, blocking until newline or timeout.
-func (s *SerialDevice) ReadLine(timeout time.Duration) (string, error) {
-	if s.port == nil {
-		return "", errors.New("serial port not open")
+	if err := s.Port.Close(); err != nil {
+		slog.Warn("failed to close serial port",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
 	}
-
-	ch := make(chan struct {
-		line string
-		err  error
-	}, 1)
-
-	go func() {
-		line, err := s.r.ReadString('\n')
-		ch <- struct {
-			line string
-			err  error
-		}{line, err}
-	}()
-
-	if timeout <= 0 {
-		res := <-ch
-		return res.line, res.err
-	}
-
-	select {
-	case res := <-ch:
-		return res.line, res.err
-	case <-time.After(timeout):
-		return "", errors.New("read timeout")
-	}
-}
-
-// WriteLine writes a single line followed by '\n' to the serial port.
-func (s *SerialDevice) WriteLine(line string) error {
-	if s.port == nil {
-		return errors.New("serial port not open")
-	}
-	_, err := s.port.Write(append([]byte(line), '\n'))
-	return err
+	slog.Info("serial port closed", "component", "serial", "path", s.Path)
+	return nil
 }
