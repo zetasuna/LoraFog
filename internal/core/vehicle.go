@@ -171,19 +171,6 @@ func (v *Vehicle) Start() error {
 
 // Stop stops the vehicle goroutines, Arduino provider and closes the device.
 func (v *Vehicle) Stop() {
-	// close stop channel (idempotent)
-	select {
-	case <-v.stop:
-		// already closed
-	default:
-		close(v.stop)
-	}
-	if v.arduinoFn != nil {
-		v.arduinoFn()
-	}
-
-	v.wg.Wait()
-
 	// close LoRa serial
 	if v.Device != nil {
 		if err := v.Device.Close(); err != nil {
@@ -197,6 +184,18 @@ func (v *Vehicle) Stop() {
 			log.Printf("[vehicle %s] arduino close err: %v", v.ID, err)
 		}
 	}
+	// close stop channel (idempotent)
+	select {
+	case <-v.stop:
+		// already closed
+	default:
+		close(v.stop)
+	}
+	if v.arduinoFn != nil {
+		v.arduinoFn()
+	}
+
+	v.wg.Wait()
 }
 
 // sendTelemetry builds a VehicleData from last data/fallback values and writes it to the Device.
