@@ -174,6 +174,7 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	// Forward to App Server if enabled
 	payloadJSON, err := json.Marshal(vd)
+	contentType = "application/json"
 	if err != nil {
 		log.Printf("[fog] encode json err: %v", err)
 		http.Error(w, "encode error", http.StatusInternalServerError)

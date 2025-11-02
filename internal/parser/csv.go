@@ -61,17 +61,17 @@ func (p *CSVParser) EncodeControl(c model.ControlData) (string, error) {
 // DecodeControl parses a CSV control message into ControlData struct.
 func (p *CSVParser) DecodeControl(line string) (model.ControlData, error) {
 	fields := strings.Split(strings.TrimSpace(line), ",")
-	if len(fields) != 8 {
-		return model.ControlData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
-	}
-
+	// if len(fields) != 8 {
+	// 	return model.ControlData{}, fmt.Errorf("expected 8 fields, got %d", len(fields))
+	// }
+	//
 	// mode, _ := strconv.ParseFloat(fields[1], 64)
-	speed, _ := strconv.ParseFloat(fields[2], 64)
-	latitude, _ := strconv.ParseFloat(fields[3], 64)
-	longitude, _ := strconv.ParseFloat(fields[4], 64)
-	kp, _ := strconv.ParseFloat(fields[5], 64)
-	ki, _ := strconv.ParseFloat(fields[6], 64)
-	kd, _ := strconv.ParseFloat(fields[7], 64)
+	speed, _ := strconv.ParseFloat(fields[1], 64)
+	latitude, _ := strconv.ParseFloat(fields[2], 64)
+	longitude, _ := strconv.ParseFloat(fields[3], 64)
+	kp, _ := strconv.ParseFloat(fields[4], 64)
+	ki, _ := strconv.ParseFloat(fields[5], 64)
+	kd, _ := strconv.ParseFloat(fields[6], 64)
 
 	return model.ControlData{
 		VehicleID: fields[0],

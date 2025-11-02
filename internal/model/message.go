@@ -17,22 +17,22 @@ type Packet struct {
 // VehicleData represents telemetry information reported by a vehicle.
 // It is the common structure shared between vehicles, gateways and fog.
 type VehicleData struct {
-	VehicleID   string  `json:"vehicle_id"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	CurrentHead int     `json:"current_head"`
-	TargetHead  int     `json:"target_head"`
-	LeftSpeed   int     `json:"left_speed"`
-	RightSpeed  int     `json:"right_speed"`
+	VehicleID   string  `json:"boatId"`
+	Latitude    float64 `json:"lat"`
+	Longitude   float64 `json:"lon"`
+	CurrentHead int     `json:"head"`
+	TargetHead  int     `json:"targetHead"`
+	LeftSpeed   int     `json:"leftSpeed"`
+	RightSpeed  int     `json:"rightSpeed"`
 }
 
 // ControlData represents a control command sent from Fog to a vehicle.
 // It can be encoded either as JSON or CSV depending on gateway configuration.
 type ControlData struct {
-	VehicleID string  `json:"vehicle_id"`
+	VehicleID string  `json:"boatId"`
 	Speed     int     `json:"speed"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
+	Latitude  float64 `json:"targetLat"`
+	Longitude float64 `json:"targetLon"`
 	Kp        float64 `json:"kp"`
 	Ki        float64 `json:"ki"`
 	Kd        float64 `json:"kd"`

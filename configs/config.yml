@@ -18,8 +18,8 @@ gateways:
     fog_url: "http://127.0.0.1:10000"
     wire_in: "csv" # format nhận từ vehicle
     wire_out: "json" # format gửi lên fog
-    # lora_device: "/tmp/ttyGW1"
-    lora_device: "/dev/lora"
+    lora_device: "/tmp/ttyGW1"
+    # lora_device: "/dev/lora"
     lora_baud: 9600
     vehicles: ["VH01", "VH02"]
   # - id: "GW02"
