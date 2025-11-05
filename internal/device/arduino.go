@@ -172,6 +172,6 @@ func (arduino *ArduinoDevice) StartSimulation(stop <-chan struct{}) error {
 			log.Printf("[arduino %s] simulate write: %s", arduino.ID, message)
 		}
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 }
