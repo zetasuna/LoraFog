@@ -1,260 +1,85 @@
-// Package core defines the Gateway component responsible for bridging LoRa-connected
-// vehicles with the FogServer using CBOR (for LoRa) and JSON (for HTTP).
+// Package core implements Gateway: TDMA master, LoRa relay, auto-tuning.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; Vehicle<->Gateway uses CBOR serialization
-// - Gateway<->FogServer uses JSON over HTTP
-// - Context-based goroutine control and safe shutdown
-// - Structured logging using slog
-// - Renamed methods and variables to follow Go naming conventions
-// - Safe Close checks and improved lifecycle management
 
 import (
 	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"sync"
 	"time"
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
-// Gateway represents a LoRa gateway that decodes CBOR messages from vehicles,
-// re-encodes them as JSON, and forwards them to the FogServer.
+// Gateway manages LoRa radio, TDMA timing, and reports to Fog.
 type Gateway struct {
 	ID         string
 	Addr       string
 	ServerAddr string
-	// vehicles   map[string]struct{}
-	keyStore   map[string][]byte // vehicleID -> session key
 	lora       *device.Lora
-	server     *http.Server
+
+	keyMu sync.Mutex
+	keys  map[string][]byte
+
+	slotDur   time.Duration
+	guardMs   int
+	slotCount int
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	wg         sync.WaitGroup
+	httpSrv    *http.Server
 }
 
-// NewGateway creates a new Gateway instance bound to a LoRa serial device.
-// func NewGateway(id, loraDev string, loraBaud int, addr, serverAddr string, vehicles []string) *Gateway {
-func NewGateway(id, loraDev string, loraBaud int, addr, serverAddr string) *Gateway {
-	lora := device.NewLora(loraDev, loraBaud)
-
-	// vmap := make(map[string]struct{}, len(vehicles))
-	// for _, v := range vehicles {
-	// 	vmap[v] = struct{}{}
-	// }
-
+// NewGateway creates a gateway instance.
+func NewGateway(id, dev string, baud int, addr, srv string) *Gateway {
 	return &Gateway{
 		ID:         id,
-		lora:       lora,
 		Addr:       addr,
-		ServerAddr: serverAddr,
-		// vehicles:   vmap,
-		keyStore: make(map[string][]byte),
+		ServerAddr: srv,
+		lora:       device.NewLora(dev, baud),
+		keys:       make(map[string][]byte),
+		slotDur:    800 * time.Millisecond,
+		guardMs:    200,
+		slotCount:  8,
 	}
 }
 
-// Start launches the gateway uplink (LoRa→Fog) and downlink (Fog→LoRa) handlers.
+// Start runs LoRa uplink/downlink and beacon broadcasting.
 func (g *Gateway) Start(ctx context.Context) error {
 	g.stopCtx, g.stopCancel = context.WithCancel(ctx)
 
-	if g.lora == nil {
-		slog.Warn("gateway running in headless mode (no serial device)",
-			"component", "gateway", "id", g.ID)
-		return nil
-	}
-
-	// Start beacon loop
 	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		beacon := model.BeaconMessage{
-			GatewayID: g.ID,
-			Timestamp: time.Now().Unix(),
-			// Nonce:     uint32(time.Now().UnixNano() & 0xffffffff),
-		}
-		// reuse same beacon object but update timestamp/nonce each tick inside BroadcastBeacon
-		g.lora.BroadcastBeacon(ctx, 30*time.Second, beacon)
-	}()
-
-	// Start LoRa uplink loop and handle HELLO message
+	go g.beaconLoop()
 	g.wg.Add(1)
-	go g.runUplink()
+	go g.uplinkLoop()
+	g.wg.Add(1)
+	go g.reportLoop()
 
-	// Start HTTP server for downlink control (Fog → Vehicle)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/command", g.handleControlRequest)
-
-	// addr := strings.TrimPrefix(strings.TrimPrefix(g.URL, "http://"), "https://")
-	addr := g.Addr
-	g.server = &http.Server{Addr: addr, Handler: mux}
+	mux.HandleFunc("/command", g.handleControl)
+	g.httpSrv = &http.Server{Addr: g.Addr, Handler: mux}
 
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		slog.Info("gateway HTTP server started",
-			"component", "gateway", "id", g.ID, "addr", addr)
-		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("gateway HTTP server error",
-				"component", "gateway", "id", g.ID, "error", err)
+		if err := g.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("gateway http error", "err", err)
 		}
 	}()
-
 	return nil
 }
 
-// runUplink continuously reads telemetry from LoRa and forwards to FogServer.
-func (g *Gateway) runUplink() {
-	defer g.wg.Done()
-
-	for {
-		select {
-		case <-g.stopCtx.Done():
-			slog.Info("uplink loop stopped", "component", "gateway", "id", g.ID)
-			return
-		default:
-		}
-
-		frame, err := g.lora.ReadFrameWithTimeout(5 * time.Second)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// attempt to unmarshal as CBOR into generic map to detect type
-		var generic map[string]any
-		if err := cbor.Unmarshal(frame, &generic); err == nil {
-			// determine message type
-			if t, ok := generic["type"].(string); ok && t == "hello" {
-				// parse HelloMessage
-				var hello model.HelloMessage
-				if err := cbor.Unmarshal(frame, &hello); err == nil {
-					// call fog register API
-					registerBody := map[string]string{
-						"gateway_id": g.ID,
-						"vehicle_id": hello.VehicleID,
-					}
-					bodyB, _ := json.Marshal(registerBody)
-					resp, err := http.Post("http://"+g.ServerAddr+"/api/register", "application/json", bytes.NewReader(bodyB))
-					if err != nil {
-						slog.Warn("register request failed", "component", "gateway", "id", g.ID, "error", err)
-						continue
-					}
-					var regResp struct {
-						VehicleID string `json:"vehicle_id"`
-						KeyHex    string `json:"key_hex"`
-						TTL       int64  `json:"ttl"`
-					}
-					_ = json.NewDecoder(resp.Body).Decode(&regResp)
-					_ = resp.Body.Close()
-
-					// decode key hex to bytes
-					// key, _ := hex.DecodeString(regResp.KeyHex)
-					if key, err := hex.DecodeString(regResp.KeyHex); err == nil {
-						g.keyStore[regResp.VehicleID] = key
-
-						// create auth message and relay to vehicle
-						auth := model.AuthMessage{
-							VehicleID: regResp.VehicleID,
-							// Key:       key,
-							TTL: regResp.TTL,
-						}
-						if err := g.lora.SendAuthRelay(auth); err != nil {
-							slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID, "error", err)
-						} else {
-							slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID)
-						}
-						continue
-					}
-				}
-			}
-		}
-
-		// Otherwise assume telemetry frame => forward to Fog as before
-		payload, err := util.ParseFrame(frame)
-		if err != nil {
-			slog.Warn("invalid frame", "component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		var telemetry model.VehicleData
-		if err := cbor.Unmarshal(payload, &telemetry); err != nil {
-			slog.Warn("failed to decode CBOR telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		payloadJSON, _ := json.Marshal(telemetry)
-		resp, err := http.Post("http://"+g.ServerAddr+"/api/telemetry", "application/json", bytes.NewReader(payloadJSON))
-		if err != nil {
-			slog.Warn("failed to forward telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		slog.Info("uplink telemetry sent",
-			"component", "gateway", "id", g.ID, "vehicle", telemetry.VehicleID)
-	}
-}
-
-// handleControlRequest receives control JSON and sends it via LoRa using CBOR.
-func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control request body",
-					"component", "gateway", "id", g.ID, "error", err)
-			}
-		}
-	}()
-
-	var control model.ControlData
-	if err := json.NewDecoder(r.Body).Decode(&control); err != nil {
-		http.Error(w, "invalid control JSON", http.StatusBadRequest)
-		return
-	}
-
-	b, err := cbor.Marshal(control)
-	if err != nil {
-		http.Error(w, "failed to encode CBOR", http.StatusInternalServerError)
-		return
-	}
-
-	if err := g.lora.WriteFrame(b); err != nil {
-		http.Error(w, "failed to send control to vehicle", http.StatusInternalServerError)
-		slog.Error("failed to write control to LoRa device",
-			"component", "gateway", "id", g.ID, "error", err)
-		return
-	}
-
-	slog.Info("control sent to vehicle",
-		"component", "gateway", "id", g.ID, "vehicle", control.VehicleID)
-	w.WriteHeader(http.StatusAccepted)
-}
-
-// Shutdown gracefully stops the gateway and closes resources.
+// Shutdown stops the gateway and closes LoRa interface.
 func (g *Gateway) Shutdown() {
-	slog.Info("stopping gateway", "component", "gateway", "id", g.ID)
-
 	if g.stopCancel != nil {
 		g.stopCancel()
-	}
-
-	if g.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := g.server.Shutdown(ctx); err != nil {
-			slog.Warn("gateway HTTP server shutdown error",
-				"component", "gateway", "id", g.ID, "error", err)
-		}
 	}
 
 	if g.lora != nil {
@@ -264,6 +89,222 @@ func (g *Gateway) Shutdown() {
 		}
 	}
 
+	if g.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := g.httpSrv.Shutdown(ctx); err != nil {
+			slog.Warn("gateway HTTP server shutdown error",
+				"component", "gateway", "id", g.ID, "error", err)
+		}
+	}
+
 	g.wg.Wait()
-	slog.Info("gateway stopped", "component", "gateway", "id", g.ID)
+	slog.Info("gateway stopped", "id", g.ID)
+}
+
+// beaconLoop periodically sends TDMA sync beacons.
+func (g *Gateway) beaconLoop() {
+	defer g.wg.Done()
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		case <-t.C:
+			beacon := map[string]any{
+				"type": "beacon", "gw": g.ID,
+				"slot":  g.slotDur.Milliseconds(),
+				"guard": g.guardMs,
+			}
+			b, _ := json.Marshal(beacon)
+			frame, _ := model.BuildPlainFrame(model.TypeBeacon, 0, make([]byte, model.NonceLen), b)
+			_ = g.lora.WriteBytes(frame)
+			slog.Debug("beacon sent", "gw", g.ID)
+		}
+	}
+}
+
+// uplinkLoop reads frames from LoRa and forwards telemetry.
+func (g *Gateway) uplinkLoop() {
+	defer g.wg.Done()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		default:
+		}
+
+		// ReadFrames returns zero or more complete frames within timeout.
+		frames, err := g.lora.ReadFrames(5 * time.Second)
+		if err != nil {
+			continue
+		}
+		if len(frames) == 0 {
+			// nothing read this cycle
+			continue
+		}
+
+		// Try secure parse using known keys
+		g.keyMu.Lock()
+		keys := make(map[string][]byte, len(g.keys))
+		maps.Copy(keys, g.keys)
+		g.keyMu.Unlock()
+
+		// Process each extracted frame
+		for _, frame := range frames {
+			handled := false
+
+			// 1) Try to decrypt/verify with each known key (fast path for secure telemetry)
+			for vid, key := range keys {
+				typ, _, _, payload, err := model.ParseFrame(frame, key)
+				if err != nil {
+					// decryption/verification failed with this key, try next
+					continue
+				}
+				// parsed OK with this key
+				if typ == model.TypeTelemetry {
+					go g.postTelemetry(vid, payload)
+				}
+				handled = true
+				break // don't try other keys for this frame
+			}
+			if handled {
+				continue // next frame
+			}
+
+			// 2) Fallback: try plain (no key) parse
+			typ, _, _, payload, err := model.ParseFrame(frame, nil)
+			if err != nil {
+				// cannot parse frame even as plain -> drop and continue
+				slog.Warn("unable to parse frame", "gw", g.ID, "err", err)
+				continue
+			}
+			if typ == model.TypeTelemetry {
+				// For plain telemetry we don't know vehicle id: post as generic telemetry.
+				// If your plain payload contains vehicle id, modify postTelemetry to accept it.
+				go g.postTelemetry("", payload)
+			} else {
+				// other plain types (hello/beacon/auth) may be ignored here or handled if needed
+				slog.Debug("received non-telemetry plain frame", "gw", g.ID, "type", typ)
+			}
+		}
+	}
+}
+
+// postTelemetry forwards telemetry to Fog server.
+func (g *Gateway) postTelemetry(vid string, data []byte) {
+	t, err := model.ParseTelemetryPacked(data)
+	if err != nil {
+		slog.Warn("failed to decode telemetry", "gw", g.ID, "err", err)
+		return
+	}
+
+	telemetry := model.TelemetryData{
+		VehicleID:  vid,
+		Latitude:   float64(t.LatI32) / 1e7,
+		Longitude:  float64(t.LonI32) / 1e7,
+		LeftSpeed:  t.SpeedU16,
+		RightSpeed: t.HeadingU16,
+	}
+
+	b, _ := json.Marshal(telemetry)
+	url := "http://" + g.ServerAddr + "/api/telemetry"
+	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	if err != nil {
+		slog.Warn("failed to send report",
+			"component", "gateway", "id", g.ID, "error", err)
+		return
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+}
+
+// handleControl handles HTTP control from Fog -> Vehicle.
+func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close control request body",
+					"component", "gateway", "id", g.ID, "error", err)
+			}
+		}
+	}()
+	var ctrl map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	vid, _ := ctrl["vehicle_id"].(string)
+	if vid == "" {
+		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
+		return
+	}
+	b, _ := json.Marshal(ctrl)
+	nonce := make([]byte, model.NonceLen)
+	g.keyMu.Lock()
+	key := g.keys[vid]
+	g.keyMu.Unlock()
+
+	var frame []byte
+	var err error
+	if len(key) == 16 {
+		frame, err = model.BuildSecureFrame(model.TypeControl, 0, nonce, b, key)
+	} else {
+		frame, err = model.BuildPlainFrame(model.TypeControl, 0, nonce, b)
+	}
+	if err == nil {
+		_ = g.lora.WriteBytes(frame)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// reportLoop posts periodic stats and performs simple auto-tuning.
+func (g *Gateway) reportLoop() {
+	defer g.wg.Done()
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		case <-t.C:
+			body := map[string]any{
+				"gw_id": g.ID, "slotUsage": g.slotCount, "avgDelay": 80, "collision": 0,
+			}
+			payload, _ := json.Marshal(body)
+			go func() {
+				resp, err := http.Post("http://"+g.ServerAddr+"/api/gw/report", "application/json", bytes.NewReader(payload))
+				if err != nil {
+					slog.Warn("failed to send report",
+						"component", "gateway", "id", g.ID, "error", err)
+					return
+				}
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+			}()
+
+			// simple tuning logic
+			if g.guardMs < 1000 {
+				g.guardMs += 20
+			}
+		}
+	}
+}
+
+// RegisterKey stores a 16-byte key for a vehicle.
+func (g *Gateway) RegisterKey(vid string, hexKey string) error {
+	k, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return err
+	}
+	if len(k) != 16 {
+		return fmt.Errorf("invalid key length")
+	}
+	g.keyMu.Lock()
+	g.keys[vid] = k
+	g.keyMu.Unlock()
+	return nil
 }

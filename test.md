@@ -1,198 +1,361 @@
 
 - /internal/model/config.go
 ```go
-// Package model defines configuration and message structures used across LoraFog.
+// Package model defines configuration structures used across LoraFog.
 package model
 
-// CHANGELOG (refactor v2):
-// - Added JSON and CBOR tags to all serializable structs
-// - Consolidated config structs and added Validate() for config validation
-// - Clarified naming and godoc comments
+// Config defines all system components loaded from YAML/JSON.
+type Config struct {
+	Server         ServerConfig          `yaml:"server" json:"server"`
+	Gateways       []GatewayConfig       `yaml:"gateways" json:"gateways"`
+	Vehicles       []VehicleConfig       `yaml:"vehicles" json:"vehicles"`
+	Arduinos       []ArduinoConfig       `yaml:"arduinos" json:"arduinos"`
+	VirtualSerials []VirtualSerialConfig `yaml:"virtual_serials" json:"virtual_serials"`
+}
+
+// ServerConfig configures the fog server and its exposed addresses.
+type ServerConfig struct {
+	Addr     string            `yaml:"address" json:"address"`
+	AppAddr  string            `yaml:"app_address" json:"app_address"`
+	Gateways []GatewayRegistry `yaml:"gateway_registry" json:"gateway_registry"`
+}
+
+// GatewayRegistry defines gateway entries for the fog registry.
+type GatewayRegistry struct {
+	ID   string `yaml:"id" json:"id"`
+	Addr string `yaml:"address" json:"address"`
+}
+
+// GatewayConfig describes one gateway instance.
+type GatewayConfig struct {
+	ID         string `yaml:"id" json:"id"`
+	Addr       string `yaml:"address" json:"address"`
+	ServerAddr string `yaml:"server_address" json:"server_address"`
+	LoraDev    string `yaml:"lora_device" json:"lora_device"`
+	LoraBaud   int    `yaml:"lora_baud" json:"lora_baud"`
+}
+
+// VehicleConfig describes one LoRa vehicle.
+type VehicleConfig struct {
+	ID          string `yaml:"id" json:"id"`
+	LoraDev     string `yaml:"lora_device" json:"lora_device"`
+	LoraBaud    int    `yaml:"lora_baud" json:"lora_baud"`
+	ArduinoDev  string `yaml:"arduino_device" json:"arduino_device"`
+	ArduinoBaud int    `yaml:"arduino_baud" json:"arduino_baud"`
+}
+
+// ArduinoConfig defines a physical Arduino connected to serial port.
+type ArduinoConfig struct {
+	Dev  string `yaml:"device" json:"device"`
+	Baud int    `yaml:"baud" json:"baud"`
+}
+
+// VirtualSerialConfig defines a linked virtual serial pair.
+type VirtualSerialConfig struct {
+	Left  string `yaml:"left" json:"left"`
+	Right string `yaml:"right" json:"right"`
+}
+
+```
+
+- /internal/model/packet.go
+```go
+// Package model implements the LoRa frame format and AES-CTR/CMAC encoding.
+package model
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 )
 
-// Config is the root configuration structure for the system.
-type Config struct {
-	Server         ServerConfig          `yaml:"server" json:"server" cbor:"server"`
-	Gateways       []GatewayConfig       `yaml:"gateways" json:"gateways" cbor:"gateways"`
-	Vehicles       []VehicleConfig       `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
-	Arduinos       []ArduinoConfig       `yaml:"arduinos" json:"arduinos" cbor:"arduinos"`
-	VirtualSerials []VirtualSerialConfig `yaml:"virtual_serials" json:"virtual_serials" cbor:"virtual_serials"`
+// Frame constants.
+const (
+	PreambleByte byte = 0xAA
+	TagLen            = 8
+	NonceLen          = 8
+	HeaderLen         = 1 + 1 + 1 + 1 + NonceLen
+)
+
+// PacketType defines LoRa packet categories.
+type PacketType byte
+
+const (
+	TypeTelemetry PacketType = 't'
+	TypeControl   PacketType = 'c'
+	TypeHello     PacketType = 'h'
+	TypeBeacon    PacketType = 'b'
+	TypeAuth      PacketType = 'a'
+	TypeAck       PacketType = 'k'
+)
+
+// TelemetryPacked is the compact 12-byte telemetry layout.
+type TelemetryPacked struct {
+	LatI32     int32
+	LonI32     int32
+	SpeedU16   uint16
+	HeadingU16 uint16
 }
 
-// ServerConfig configures the fog server and app forwarder.
-type ServerConfig struct {
-	FogAddr  string            `yaml:"fog_addr" json:"fog_addr" cbor:"fog_addr"`
-	AppAddr  string            `yaml:"app_addr" json:"app_addr" cbor:"app_addr"`
-	Gateways []GatewayRegistry `yaml:"gateway_registry" json:"gateway_registry" cbor:"gateway_registry"`
+// BuildTelemetryPacked packs telemetry into 12 bytes.
+func BuildTelemetryPacked(lat, lon int32, speed, heading uint16) []byte {
+	b := make([]byte, 12)
+	binary.BigEndian.PutUint32(b[0:4], uint32(lat))
+	binary.BigEndian.PutUint32(b[4:8], uint32(lon))
+	binary.BigEndian.PutUint16(b[8:10], speed)
+	binary.BigEndian.PutUint16(b[10:12], heading)
+	return b
 }
 
-// GatewayRegistry is used to register gateways to the fog server on startup.
-type GatewayRegistry struct {
-	ID       string   `yaml:"id" json:"id" cbor:"id"`
-	URL      string   `yaml:"url" json:"url" cbor:"url"`
-	Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
-}
-
-// GatewayConfig config for a Gateway instance.
-type GatewayConfig struct {
-	ID       string   `yaml:"id" json:"id" cbor:"id"`
-	URL      string   `yaml:"url" json:"url" cbor:"url"`
-	FogURL   string   `yaml:"fog_url" json:"fog_url" cbor:"fog_url"`
-	LoraDev  string   `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
-	LoraBaud int      `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
-	Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
-}
-
-// VehicleConfig config for a Vehicle agent.
-type VehicleConfig struct {
-	ID                  string `yaml:"id" json:"id" cbor:"id"`
-	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms" json:"telemetry_interval_ms" cbor:"telemetry_interval_ms"`
-	LoraDev             string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
-	LoraBaud            int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
-	ArduinoDev          string `yaml:"arduino_device" json:"arduino_device" cbor:"arduino_device"`
-	ArduinoBaud         int    `yaml:"arduino_baud" json:"arduino_baud" cbor:"arduino_baud"`
-}
-
-// ArduinoConfig defines a serial Arduino connection.
-type ArduinoConfig struct {
-	Dev  string `yaml:"device" json:"device" cbor:"device"`
-	Baud int    `yaml:"baud" json:"baud" cbor:"baud"`
-}
-
-// VirtualSerialConfig defines a pair of linked virtual serial endpoints.
-type VirtualSerialConfig struct {
-	Left  string `yaml:"left" json:"left" cbor:"left"`
-	Right string `yaml:"right" json:"right" cbor:"right"`
-}
-
-// Validate checks the configuration for basic correctness.
-// It returns an error describing the first problem found.
-func (c *Config) Validate() error {
-	if c == nil {
-		return errors.New("config is nil")
+// ParseTelemetryPacked unpacks 12-byte telemetry into struct.
+func ParseTelemetryPacked(b []byte) (TelemetryPacked, error) {
+	if len(b) != 12 {
+		return TelemetryPacked{}, fmt.Errorf("invalid telemetry length %d", len(b))
 	}
-	if c.Server.FogAddr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
-		return errors.New("no fog address and no gateways/vehicles configured")
+	return TelemetryPacked{
+		LatI32:     int32(binary.BigEndian.Uint32(b[0:4])),
+		LonI32:     int32(binary.BigEndian.Uint32(b[4:8])),
+		SpeedU16:   binary.BigEndian.Uint16(b[8:10]),
+		HeadingU16: binary.BigEndian.Uint16(b[10:12]),
+	}, nil
+}
+
+// BuildPlainFrame builds a plaintext LoRa frame (no encryption).
+func BuildPlainFrame(typ PacketType, seq byte, nonce []byte, payload []byte) ([]byte, error) {
+	if len(nonce) != NonceLen {
+		return nil, errors.New("invalid nonce length")
 	}
-	ids := map[string]struct{}{}
-	for i, gw := range c.Gateways {
-		if gw.ID == "" {
-			return fmt.Errorf("gateways[%d]: id is empty", i)
-		}
-		if gw.FogURL == "" {
-			return fmt.Errorf("gateways[%d]: fog_url is empty", i)
-		}
-		if _, ok := ids[gw.ID]; ok {
-			return fmt.Errorf("duplicate id in gateways: %s", gw.ID)
-		}
-		ids[gw.ID] = struct{}{}
+	totalLen := HeaderLen + len(payload) + TagLen
+	if totalLen > 255 {
+		return nil, errors.New("frame too long")
 	}
-	// Validate vehicles
-	for i, v := range c.Vehicles {
-		if v.ID == "" {
-			return fmt.Errorf("vehicles[%d]: id is empty", i)
+
+	buf := &bytes.Buffer{}
+	buf.WriteByte(PreambleByte)
+	buf.WriteByte(byte(totalLen))
+	buf.WriteByte(byte(typ))
+	buf.WriteByte(seq)
+	buf.Write(nonce)
+	buf.Write(payload)
+	buf.Write(make([]byte, TagLen))
+	return buf.Bytes(), nil
+}
+
+// BuildSecureFrame encrypts and authenticates payload using AES-CTR + CMAC.
+func BuildSecureFrame(typ PacketType, seq byte, nonce []byte, payload []byte, key []byte) ([]byte, error) {
+	if len(key) != 16 {
+		return nil, errors.New("key must be 16 bytes")
+	}
+	if len(nonce) != NonceLen {
+		return nil, errors.New("invalid nonce length")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Encrypt with AES-CTR
+	iv := make([]byte, aes.BlockSize)
+	copy(iv, nonce)
+	iv[8] = seq
+	ctr := cipher.NewCTR(block, iv)
+	ct := make([]byte, len(payload))
+	ctr.XORKeyStream(ct, payload)
+
+	// Compute CMAC tag
+	macData := append([]byte{byte(typ), seq}, append(nonce, ct...)...)
+	tag := aesCmac(block, macData)[:TagLen]
+
+	totalLen := HeaderLen + len(ct) + len(tag)
+	if totalLen > 255 {
+		return nil, errors.New("frame too long")
+	}
+
+	buf := &bytes.Buffer{}
+	buf.WriteByte(PreambleByte)
+	buf.WriteByte(byte(totalLen))
+	buf.WriteByte(byte(typ))
+	buf.WriteByte(seq)
+	buf.Write(nonce)
+	buf.Write(ct)
+	buf.Write(tag)
+	return buf.Bytes(), nil
+}
+
+// ParseFrame parses and verifies a LoRa frame.
+func ParseFrame(frame []byte, key []byte) (PacketType, byte, []byte, []byte, error) {
+	if len(frame) < HeaderLen+TagLen {
+		return 0, 0, nil, nil, errors.New("frame too short")
+	}
+	if frame[0] != PreambleByte {
+		return 0, 0, nil, nil, errors.New("invalid preamble")
+	}
+
+	length := int(frame[1])
+	if length > len(frame) {
+		return 0, 0, nil, nil, errors.New("declared length exceeds buffer")
+	}
+	frame = frame[:length]
+
+	typ := PacketType(frame[2])
+	seq := frame[3]
+	nonce := frame[4 : 4+NonceLen]
+	data := frame[4+NonceLen:]
+	ct := data[:len(data)-TagLen]
+	tag := data[len(data)-TagLen:]
+
+	// no key = plain mode
+	if key == nil {
+		return typ, seq, nonce, ct, nil
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+
+	macData := append([]byte{byte(typ), seq}, append(nonce, ct...)...)
+	expected := aesCmac(block, macData)[:TagLen]
+	if !bytes.Equal(tag, expected) {
+		return 0, 0, nil, nil, errors.New("cmac mismatch")
+	}
+
+	iv := make([]byte, aes.BlockSize)
+	copy(iv, nonce)
+	iv[8] = seq
+	ctr := cipher.NewCTR(block, iv)
+	pt := make([]byte, len(ct))
+	ctr.XORKeyStream(pt, ct)
+	return typ, seq, nonce, pt, nil
+}
+
+// aesCmac implements RFC4493 AES-CMAC (returns 16-byte tag).
+func aesCmac(block cipher.Block, msg []byte) []byte {
+	const n = aes.BlockSize
+	zero := make([]byte, n)
+	L := make([]byte, n)
+	block.Encrypt(L, zero)
+	k1 := subkey(L)
+	k2 := subkey(k1)
+
+	m := len(msg)
+	num := (m + n - 1) / n
+	if num == 0 {
+		num = 1
+	}
+	X := make([]byte, n)
+	Y := make([]byte, n)
+	for i := range num - 1 {
+		for j := range n {
+			Y[j] = X[j] ^ msg[i*n+j]
+		}
+		block.Encrypt(X, Y)
+	}
+	last := make([]byte, n)
+	if m > 0 && m%n == 0 {
+		copy(last, msg[m-n:])
+		for i := range n {
+			last[i] ^= k1[i]
+		}
+	} else {
+		start := (num - 1) * n
+		copy(last, msg[start:])
+		last[m%n] = 0x80
+		for i := range n {
+			last[i] ^= k2[i]
 		}
 	}
-	return nil
+	for i := range n {
+		Y[i] = X[i] ^ last[i]
+	}
+	T := make([]byte, n)
+	block.Encrypt(T, Y)
+	return T
+}
+
+// subkey generates next CMAC subkey.
+func subkey(k []byte) []byte {
+	const n = aes.BlockSize
+	rb := byte(0x87)
+	out := make([]byte, n)
+	carry := byte(0)
+	for i := n - 1; i >= 0; i-- {
+		b := k[i]
+		out[i] = (b << 1) | carry
+		carry = (b >> 7) & 1
+	}
+	if k[0]>>7 == 1 {
+		out[n-1] ^= rb
+	}
+	return out
+}
+
+// DecodeKeyHex decodes a 16-byte AES key from hex string.
+func DecodeKeyHex(h string) ([]byte, error) {
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != 16 {
+		return nil, fmt.Errorf("invalid key length %d", len(b))
+	}
+	return b, nil
 }
 
 ```
 
 - /internal/model/message.go
 ```go
-// Package model provides message definitions exchanged across components.
+// Package model defines the data structures
 package model
 
-// CHANGELOG (refactor v2):
-// - Added json and cbor struct tags
-// - Minor naming cleanup for clarity
-
-// PacketType identifies packet category.
-type PacketType string
-
-const (
-	PacketTelemetry PacketType = "t"
-	PacketControl   PacketType = "c"
-)
-
-// Packet encapsulates a typed payload.
-type Packet struct {
-	Type PacketType `json:"type" cbor:"type"`
-	Data any        `json:"data" cbor:"data"`
+// TelemetryData represents telemetry information reported by a vehicle.
+// It is the common structure shared between vehicles, gateways and fog.
+type TelemetryData struct {
+	VehicleID   string  `json:"boatId"`
+	Latitude    float64 `json:"lat"`
+	Longitude   float64 `json:"lon"`
+	CurrentHead uint16  `json:"head"`
+	TargetHead  uint16  `json:"targetHead"`
+	LeftSpeed   uint16  `json:"leftSpeed"`
+	RightSpeed  uint16  `json:"rightSpeed"`
 }
 
-// VehicleData represents telemetry reported by a vehicle.
-type VehicleData struct {
-	VehicleID   string  `json:"vehicle_id" cbor:"vehicle_id"` // prefer small IDs in LoRa
-	Latitude    float64 `json:"latitude" cbor:"latitude"`
-	Longitude   float64 `json:"longitude" cbor:"longitude"`
-	CurrentHead int     `json:"current_head" cbor:"current_head"`
-	TargetHead  int     `json:"target_head" cbor:"target_head"`
-	LeftSpeed   int     `json:"left_speed" cbor:"left_speed"`
-	RightSpeed  int     `json:"right_speed" cbor:"right_speed"`
-}
-
-// ControlData represents a control command sent to a vehicle.
+// ControlData represents a control command sent from Fog to a vehicle.
+// It can be encoded either as JSON or CSV depending on gateway configuration.
 type ControlData struct {
-	VehicleID string  `json:"vehicle_id" cbor:"vehicle_id"`
-	Speed     int     `json:"speed" cbor:"speed"`
-	Latitude  float64 `json:"latitude" cbor:"latitude"`
-	Longitude float64 `json:"longitude" cbor:"longitude"`
-	Kp        float64 `json:"kp" cbor:"kp"`
-	Ki        float64 `json:"ki" cbor:"ki"`
-	Kd        float64 `json:"kd" cbor:"kd"`
+	VehicleID string  `json:"boatId"`
+	Speed     int     `json:"speed"`
+	Latitude  float64 `json:"targetLat"`
+	Longitude float64 `json:"targetLon"`
+	Kp        float64 `json:"kp"`
+	Ki        float64 `json:"ki"`
+	Kd        float64 `json:"kd"`
 }
 
-// ArduinoData represents raw telemetry from Arduino sensors.
+// ArduinoData represents telemetry data collected by arduino
 type ArduinoData struct {
-	Latitude    float64 `json:"latitude" cbor:"latitude"`
-	Longitude   float64 `json:"longitude" cbor:"longitude"`
-	LeftSpeed   int     `json:"left_speed" cbor:"left_speed"`
-	RightSpeed  int     `json:"right_speed" cbor:"right_speed"`
-	CurrentHead int     `json:"current_head" cbor:"current_head"`
-	TargetHead  int     `json:"target_head" cbor:"target_head"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	LeftSpeed   int     `json:"left_speed"`
+	RightSpeed  int     `json:"right_speed"`
+	CurrentHead int     `json:"current_head"`
+	TargetHead  int     `json:"target_head"`
 }
 
-// ArduinoControl is the format for commands forwarded to Arduino.
+// ArduinoControl represents telemetry data collected by arduino
 type ArduinoControl struct {
-	CruiseSpeed int     `json:"cruise_speed" cbor:"cruise_speed"`
-	Latitude    float64 `json:"latitude" cbor:"latitude"`
-	Longitude   float64 `json:"longitude" cbor:"longitude"`
-	Kp          float64 `json:"kp" cbor:"kp"`
-	Ki          float64 `json:"ki" cbor:"ki"`
-	Kd          float64 `json:"kd" cbor:"kd"`
-}
-
-// GatewayRegistration is used when registering gateways to the fog server.
-type GatewayRegistration struct {
-	GatewayID string   `json:"gateway_id" cbor:"gateway_id"`
-	URL       string   `json:"url" cbor:"url"`
-	Vehicles  []string `json:"vehicles" cbor:"vehicles"`
-}
-
-// BeaconMessage is broadcasted by Gateway to Vehicle.
-type BeaconMessage struct {
-	// GatewayID short id (nên dùng string ngắn hoặc uint16)
-	GatewayID string `json:"gateway_id" cbor:"gateway_id"`
-	Timestamp int64  `json:"timestamp" cbor:"timestamp"`
-	// Nonce     uint32 `json:"nonce" cbor:"nonce"` // 4-byte nonce
-}
-
-// HelloMessage is sent by Vehicle to Gateway when receive beacon message.
-type HelloMessage struct {
-	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	// NonceReply uint32 `json:"nonce_reply" cbor:"nonce_reply"`
-}
-
-// AuthMessage (relay from Fog -> Gateway -> Vehicle) contains key and TTL.
-type AuthMessage struct {
-	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	// Key       []byte `json:"key" cbor:"key"`
-	TTL int64 `json:"ttl" cbor:"ttl"` // seconds
+	CruiseSpeed int     `json:"cruise_speed"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	Kp          float64 `json:"kp"`
+	Ki          float64 `json:"ki"`
+	Kd          float64 `json:"kd"`
 }
 
 ```
@@ -355,188 +518,14 @@ func (m *SocatManager) CleanupAll() {
 
 ```
 
-- /internal/util/hmac.go
-```go
-package util
-
-import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"fmt"
-)
-
-// GenerateRandomKey returns n random bytes (use n=16 for AES-128 / HMAC key).
-func GenerateRandomKey(n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate random key: %w", err)
-	}
-	return b, nil
-}
-
-// ComputeHMAC computes HMAC-SHA256 and returns the first tagLen bytes.
-func ComputeHMAC(key, data []byte, tagLen int) []byte {
-	m := hmac.New(sha256.New, key)
-	_, _ = m.Write(data)
-	full := m.Sum(nil)
-	if tagLen <= 0 || tagLen > len(full) {
-		tagLen = len(full)
-	}
-	return full[:tagLen]
-}
-
-// VerifyHMAC compares truncated HMAC in constant time.
-func VerifyHMAC(key, data, tag []byte) bool {
-	expected := ComputeHMAC(key, data, len(tag))
-	return hmac.Equal(expected, tag)
-}
-
-```
-
-- /internal/util/packet.go
-```go
-// internal/util/packet.go
-// CHANGELOG:
-// - New helpers for building and verifying wire frames used on LoRa:
-//   Frame layout: [LEN(2)][NONCE(4)][HMAC(8)][PAYLOAD]
-// - Uses util.ComputeHMAC / VerifyHMAC for HMAC-SHA256 truncated
-
-package util
-
-import (
-	"crypto/rand"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-)
-
-// Frame constants
-const (
-	NonceLen  = 4
-	HMACLen   = 8
-	PrefixLen = 2 // LEN field (uint16)
-	HeaderLen = NonceLen + HMACLen
-	MinFrame  = PrefixLen + HeaderLen
-)
-
-// BuildFrame creates a simple frame [LEN(2)][PAYLOAD].
-func BuildFrame(payload []byte) ([]byte, error) {
-	if len(payload) == 0 {
-		return nil, errors.New("empty payload")
-	}
-	totalLen := PrefixLen + len(payload)
-	if totalLen > 0xFFFF {
-		return nil, fmt.Errorf("payload too large")
-	}
-
-	frame := make([]byte, totalLen)
-	binary.BigEndian.PutUint16(frame[0:PrefixLen], uint16(len(payload)))
-	copy(frame[PrefixLen:], payload)
-	return frame, nil
-}
-
-// ParseFrame strips the 2-byte prefix and returns only the payload.
-func ParseFrame(frame []byte) ([]byte, error) {
-	if len(frame) < PrefixLen {
-		return nil, errors.New("frame too short")
-	}
-	expectedLen := int(binary.BigEndian.Uint16(frame[:PrefixLen]))
-	if expectedLen != len(frame)-PrefixLen {
-		return nil, fmt.Errorf("length mismatch: got %d, expected %d", len(frame)-PrefixLen, expectedLen)
-	}
-	return frame[PrefixLen:], nil
-}
-
-// BuildFrameWithKey builds a wire frame from payload and a shared key.
-// Returns full frame including 2-byte length prefix.
-// Frame = [LEN:2][NONCE:4][HMAC:8][PAYLOAD]
-func BuildFrameWithKey(key []byte, payload []byte) ([]byte, error) {
-	if len(key) == 0 {
-		return nil, errors.New("empty key")
-	}
-	// generate 4-byte nonce
-	var nonce [NonceLen]byte
-	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
-		return nil, fmt.Errorf("generate nonce: %w", err)
-	}
-
-	// compute HMAC over (nonce || payload)
-	data := append(nonce[:], payload...)
-	tag := ComputeHMAC(key, data, HMACLen)
-
-	totalLen := PrefixLen + HeaderLen + len(payload)
-	if totalLen > 0xFFFF {
-		return nil, fmt.Errorf("payload too large")
-	}
-
-	frame := make([]byte, totalLen)
-	// write length (big endian) at [0:2]
-	binary.BigEndian.PutUint16(frame[0:PrefixLen], uint16(totalLen))
-	// write nonce
-	copy(frame[PrefixLen:PrefixLen+NonceLen], nonce[:])
-	// write tag
-	copy(frame[PrefixLen+NonceLen:PrefixLen+NonceLen+HMACLen], tag)
-	// write payload
-	copy(frame[PrefixLen+HeaderLen:], payload)
-
-	return frame, nil
-}
-
-// ParseAndVerifyFrameWithKey parses a raw frame (as returned by LoraDevice.ReadFrame())
-// and verifies HMAC using the provided key. If valid, returns payload and nonce.
-func ParseAndVerifyFrameWithKey(key []byte, frame []byte) (payload []byte, nonce []byte, err error) {
-	if len(frame) < HeaderLen {
-		return nil, nil, errors.New("frame too short")
-	}
-	// Expectation: caller may pass in payload portion (without LEN) or full frame with LEN.
-	// Accept both: if len(frame) >= MinFrame and the first two bytes look like length, strip prefix.
-	if len(frame) >= MinFrame {
-		// check whether first two bytes indicate the total length equals len(frame)
-		pref := binary.BigEndian.Uint16(frame[0:PrefixLen])
-		if int(pref) == len(frame) {
-			// strip length prefix
-			frame = frame[PrefixLen:]
-		}
-	}
-	// Now frame layout: [NONCE(4)][HMAC(8)][PAYLOAD]
-	if len(frame) < HeaderLen {
-		return nil, nil, errors.New("payload too short after stripping prefix")
-	}
-
-	nonce = make([]byte, NonceLen)
-	copy(nonce, frame[0:NonceLen])
-	tag := frame[NonceLen : NonceLen+HMACLen]
-	payload = make([]byte, len(frame)-HeaderLen)
-	copy(payload, frame[HeaderLen:])
-
-	// compute expected tag
-	data := append(nonce, payload...)
-	if !VerifyHMAC(key, data, tag) {
-		return nil, nil, errors.New("hmac verification failed")
-	}
-	return payload, nonce, nil
-}
-
-```
-
 - /internal/core/system.go
 ```go
-// Package core implements the orchestration and communication logic for the LoraFog edge system.
+// Package core orchestrates system startup and shutdown.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser layer and wire_format configuration
-// - Unified goroutine lifecycle via context.Context
-// - Introduced structured logging using log/slog
-// - Renamed symbols to follow Go naming conventions (Start, Shutdown, socatManager, etc.)
-// - Added nil-safe Close checks to suppress unchecked warnings
-// - Improved documentation and function clarity for maintainability
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -549,11 +538,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// System manages the lifecycle of FogServer, Gateways, Vehicles, and Arduino devices.
+// System manages Fog server, gateways, and vehicles.
 type System struct {
 	configPath   string
 	config       *model.Config
-	fogServer    *FogServer
+	server       *Server
 	gateways     []*Gateway
 	vehicles     []*Vehicle
 	arduinos     []*device.Arduino
@@ -563,198 +552,360 @@ type System struct {
 	wg     sync.WaitGroup
 }
 
-// NewSystem loads configuration from YAML and constructs the runtime components.
-func NewSystem(configPath string) (*System, error) {
-	data, err := os.ReadFile(configPath)
+// NewSystem constructs a System from YAML configuration.
+func NewSystem(path string) (*System, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-
 	var cfg model.Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
 
 	sys := &System{
-		configPath:   configPath,
+		configPath:   path,
 		config:       &cfg,
 		socatManager: util.NewSocatManager(),
 	}
 
-	// Initialize virtual serial pairs if configured.
-	for _, pair := range cfg.VirtualSerials {
-		if err := sys.socatManager.CreatePair(pair.Left, pair.Right); err != nil {
-			slog.Warn("failed to create virtual serial pair",
-				"left", pair.Left, "right", pair.Right, "error", err)
-		}
+	for _, vs := range cfg.VirtualSerials {
+		_ = sys.socatManager.CreatePair(vs.Left, vs.Right)
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(300 * time.Millisecond)
 
-	// Construct FogServer
-	if cfg.Server.FogAddr != "" {
-		sys.fogServer = NewFogServer(cfg.Server.FogAddr, cfg.Server.AppAddr)
-		for _, g := range cfg.Server.Gateways {
-			sys.fogServer.RegisterGateway(g.ID, g.URL, g.Vehicles)
-			slog.Info("registered gateway",
-				"component", "fog",
-				"id", g.ID,
-				"url", g.URL,
-				"vehicles", g.Vehicles)
-		}
+	if cfg.Server.Addr != "" {
+		sys.server = NewServer(cfg.Server.Addr, cfg.Server.AppAddr)
 	}
-
-	// Construct Gateways
-	for _, gwCfg := range cfg.Gateways {
-		gw := NewGateway(
-			gwCfg.ID,
-			gwCfg.LoraDev,
-			gwCfg.LoraBaud,
-			gwCfg.URL,
-			gwCfg.FogURL,
-			gwCfg.Vehicles,
-		)
-		sys.gateways = append(sys.gateways, gw)
+	for _, g := range cfg.Gateways {
+		sys.gateways = append(sys.gateways, NewGateway(g.ID, g.LoraDev, g.LoraBaud, g.Addr, g.ServerAddr))
 	}
-
-	// Construct Vehicles
-	for _, vCfg := range cfg.Vehicles {
-		v := NewVehicle(
-			vCfg.ID,
-			vCfg.LoraDev,
-			vCfg.LoraBaud,
-			vCfg.ArduinoDev,
-			vCfg.ArduinoBaud,
-			time.Duration(vCfg.TelemetryIntervalMs)*time.Millisecond,
-		)
-		sys.vehicles = append(sys.vehicles, v)
+	for _, v := range cfg.Vehicles {
+		sys.vehicles = append(sys.vehicles, NewVehicle(v.ID, v.LoraDev, v.LoraBaud, v.ArduinoDev, v.ArduinoBaud))
 	}
-
-	// Construct Arduino simulators
-	for _, aCfg := range cfg.Arduinos {
-		sys.arduinos = append(sys.arduinos,
-			device.NewArduino(aCfg.Dev, aCfg.Baud))
+	for _, a := range cfg.Arduinos {
+		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Dev, a.Baud))
 	}
 
 	return sys, nil
 }
 
-// Start launches all active components under a shared context.
+// Start launches all system components.
 func (s *System) Start(ctx context.Context) error {
-	if s.fogServer == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
-		return errors.New("no components to start")
+	if s.server == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
+		return fmt.Errorf("no active components")
 	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	// Start FogServer
-	if s.fogServer != nil {
+	if s.server != nil {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			slog.Info("starting fog server",
-				"component", "fog", "addr", s.fogServer.Addr)
-			if err := s.fogServer.Start(ctx); err != nil {
-				slog.Error("fog server stopped with error",
-					"component", "fog", "error", err)
-			}
+			_ = s.server.Start(ctx)
 		}()
 	}
-
-	// Start Gateways
 	for _, gw := range s.gateways {
-		if err := gw.Start(ctx); err != nil {
-			slog.Warn("gateway start failed",
-				"component", "gateway", "id", gw.ID, "error", err)
-		} else {
-			slog.Info("gateway started",
-				"component", "gateway", "id", gw.ID)
-		}
+		_ = gw.Start(ctx)
 	}
-
-	// Start Vehicles
-	for _, v := range s.vehicles {
-		if err := v.Start(ctx); err != nil {
-			slog.Warn("vehicle start failed",
-				"component", "vehicle", "id", v.ID, "error", err)
-		} else {
-			slog.Info("vehicle started",
-				"component", "vehicle", "id", v.ID)
-		}
+	for _, vh := range s.vehicles {
+		_ = vh.Start(ctx)
 	}
-
-	// Start Arduino simulations
-	for _, a := range s.arduinos {
+	for _, ino := range s.arduinos {
 		s.wg.Add(1)
-		go func(a *device.Arduino) {
+		go func(ino *device.Arduino) {
 			defer s.wg.Done()
-			slog.Info("starting arduino simulation",
-				"component", "arduino", "device", a.Device)
 			stop := make(chan struct{})
 			go func() {
 				<-ctx.Done()
 				close(stop)
 			}()
-			if err := a.StartSimulation(stop); err != nil {
-				slog.Error("arduino simulation failed",
-					"component", "arduino", "device", a.Device, "error", err)
-			}
-		}(a)
+			_ = ino.StartSimulation(stop)
+		}(ino)
 	}
-
 	return nil
 }
 
-// Shutdown gracefully stops all components and cleans up resources.
+// Shutdown gracefully stops all components.
 func (s *System) Shutdown() {
+	slog.Info("system shutting down")
 	if s.cancel != nil {
-		slog.Info("initiating system shutdown", "component", "system")
 		s.cancel()
 	}
-
 	for _, gw := range s.gateways {
 		gw.Shutdown()
 	}
-	for _, v := range s.vehicles {
-		v.Shutdown()
+	for _, vh := range s.vehicles {
+		vh.Shutdown()
 	}
-	for _, a := range s.arduinos {
-		if a != nil {
-			if err := a.Close(); err != nil {
-				slog.Warn("failed to close arduino",
-					"component", "arduino", "device", a.Device, "error", err)
-			}
-		}
+	for _, ino := range s.arduinos {
+		_ = ino.Close()
 	}
-
+	if s.server != nil {
+		_ = s.server.Shutdown()
+	}
 	if s.socatManager != nil {
 		s.socatManager.Cleanup()
 	}
-
 	s.wg.Wait()
-	slog.Info("system shutdown complete", "component", "system")
+	slog.Info("shutdown complete")
+}
+
+```
+
+- /internal/core/vehicle.go
+```go
+// Package core implements Vehicle node logic.
+package core
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"LoraFog/internal/device"
+	"LoraFog/internal/model"
+)
+
+// Vehicle represents one LoRa boat node.
+type Vehicle struct {
+	ID         string
+	lora       *device.Lora
+	arduino    *device.Arduino
+	sessionKey []byte
+
+	cancel context.CancelFunc
+}
+
+// NewVehicle creates a new Vehicle instance.
+func NewVehicle(id, dev string, baud int, arDev string, arBaud int) *Vehicle {
+	v := &Vehicle{
+		ID:   id,
+		lora: device.NewLora(dev, baud),
+	}
+	if arDev != "" {
+		v.arduino = device.NewArduino(arDev, arBaud)
+	}
+	return v
+}
+
+// Start begins LoRa and Arduino telemetry loop.
+func (v *Vehicle) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	v.cancel = cancel
+
+	go v.listenLoop(ctx)
+	if v.arduino != nil {
+		go v.telemetryLoop(ctx)
+	}
+	return nil
+}
+
+// Shutdown stops the vehicle operations.
+func (v *Vehicle) Shutdown() {
+	if v.cancel != nil {
+		v.cancel()
+	}
+	if v.lora != nil {
+		_ = v.lora.Close()
+	}
+	if v.arduino != nil {
+		_ = v.arduino.Close()
+	}
+	slog.Info("vehicle stopped", "id", v.ID)
+}
+
+// listenLoop handles incoming LoRa frames (beacon/auth/control).
+func (v *Vehicle) listenLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// ReadFrames returns zero or more complete frames within timeout
+		frames, err := v.lora.ReadFrames(10 * time.Second)
+		if err != nil {
+			// timeout or read error — continue listening
+			continue
+		}
+		if len(frames) == 0 {
+			// nothing read this cycle
+			continue
+		}
+
+		// Try parse with current session key (if any). ParseFrame returns plaintext payload if key ok,
+		// otherwise error. For plain frames, pass nil key.
+		// Process each complete frame extracted by ReadFrames()
+		for _, frame := range frames {
+			var (
+				typ     model.PacketType
+				payload []byte
+			)
+
+			// If we have a session key, try decrypt/verify first.
+			if v.sessionKey != nil {
+				typ, _, _, payload, err = model.ParseFrame(frame, v.sessionKey)
+				if err != nil {
+					// try plain fallback (no key)
+					typ, _, _, payload, err = model.ParseFrame(frame, nil)
+					if err != nil {
+						// unable to parse even as plain — skip this frame
+						slog.Warn("failed to parse frame (secure and plain)", "vehicle", v.ID, "err", err)
+						continue
+					}
+				}
+			} else {
+				// no key -> parse as plain
+				typ, _, _, payload, err = model.ParseFrame(frame, nil)
+				if err != nil {
+					slog.Warn("failed to parse plain frame", "vehicle", v.ID, "err", err)
+					continue
+				}
+			}
+			switch typ {
+			case model.TypeBeacon:
+				v.handleBeacon()
+			case model.TypeAuth:
+				v.handleAuth(payload)
+			case model.TypeControl:
+				v.handleControl(payload)
+			default:
+				// ignore other types
+				slog.Debug("ignoring unknown packet type", "vehicle", v.ID, "type", typ)
+			}
+		}
+	}
+}
+
+// telemetryLoop reads Arduino data and sends telemetry frames.
+func (v *Vehicle) telemetryLoop(ctx context.Context) {
+	ch := make(chan model.ArduinoData, 4)
+	stop, err := v.arduino.Read(ch)
+	if err != nil {
+		slog.Warn("arduino read failed", "vehicle", v.ID, "err", err)
+		return
+	}
+	defer stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case d, ok := <-ch:
+			if !ok {
+				return
+			}
+			v.sendTelemetry(d)
+		}
+	}
+}
+
+// sendTelemetry packs and transmits telemetry data.
+func (v *Vehicle) sendTelemetry(d model.ArduinoData) {
+	lat := int32(d.Latitude * 1e7)
+	lon := int32(d.Longitude * 1e7)
+	speed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
+	head := uint16(d.CurrentHead % 360)
+
+	payload := model.BuildTelemetryPacked(lat, lon, speed, head)
+
+	nonce := make([]byte, model.NonceLen)
+	copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLen])
+
+	var frame []byte
+	var err error
+	if v.sessionKey != nil {
+		frame, err = model.BuildSecureFrame(model.TypeTelemetry, 0, nonce, payload, v.sessionKey)
+	} else {
+		frame, err = model.BuildPlainFrame(model.TypeTelemetry, 0, nonce, payload)
+	}
+	if err != nil {
+		slog.Warn("build telemetry frame failed", "vehicle", v.ID, "err", err)
+		return
+	}
+	if err := v.lora.WriteBytes(frame); err != nil {
+		slog.Warn("failed to write telemetry frame", "vehicle", v.ID, "err", err)
+		return
+	}
+	slog.Debug("telemetry sent", "vehicle", v.ID)
+}
+
+// handleBeacon sends a HELLO frame to gateway when a beacon is seen.
+func (v *Vehicle) handleBeacon() {
+	msg := map[string]any{"type": "hello", "vehicle_id": v.ID}
+	b, _ := json.Marshal(msg)
+	nonce := make([]byte, model.NonceLen)
+	copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLen])
+	frame, _ := model.BuildPlainFrame(model.TypeHello, 0, nonce, b)
+	_ = v.lora.WriteBytes(frame)
+	slog.Info("HELLO sent", "vehicle", v.ID)
+}
+
+// handleAuth processes an auth frame payload (expects JSON with key_hex and ttl).
+func (v *Vehicle) handleAuth(p []byte) {
+	var am map[string]any
+	if err := json.Unmarshal(p, &am); err != nil {
+		slog.Warn("invalid auth payload", "vehicle", v.ID, "err", err)
+		return
+	}
+	if kh, ok := am["key_hex"].(string); ok && kh != "" {
+		kb, err := hex.DecodeString(kh)
+		if err != nil {
+			slog.Warn("invalid key hex", "vehicle", v.ID, "err", err)
+		} else if len(kb) == 16 {
+			v.sessionKey = kb
+			slog.Info("session key applied", "vehicle", v.ID)
+		}
+	}
+	if ttlf, ok := am["ttl"].(float64); ok {
+		_ = ttlf // we could store expiry if needed
+	}
+}
+
+// handleControl forwards downlink control to Arduino or logs it.
+func (v *Vehicle) handleControl(p []byte) {
+	// Control payload may be JSON or raw bytes; try JSON decode for helpful log.
+	var ctrl map[string]any
+	if err := json.Unmarshal(p, &ctrl); err == nil {
+		slog.Info("control received", "vehicle", v.ID, "cmd", ctrl)
+	} else {
+		slog.Info("control received (raw)", "vehicle", v.ID)
+	}
+	if v.arduino != nil {
+		// forward raw bytes as string (Arduino expects line-based). Adapt as necessary.
+		_ = v.arduino.Write(string(p))
+	}
+}
+
+// ApplyKeyHex sets AES key for secure transmission.
+func (v *Vehicle) ApplyKeyHex(h string) error {
+	k, err := hex.DecodeString(h)
+	if err != nil {
+		return err
+	}
+	if len(k) != 16 {
+		return fmt.Errorf("invalid key length %d", len(k))
+	}
+	v.sessionKey = k
+	slog.Info("applied session key", "vehicle", v.ID)
+	return nil
 }
 
 ```
 
 - /internal/core/server.go
 ```go
-// Package core defines the FogServer, which bridges gateways and application layers
-// via HTTP and WebSocket communication.
+// Package core implements the Fog server — registry, WebSocket, telemetry & control APIs.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; JSON only for external communication
-// - Context-based lifecycle management
-// - Structured logging via slog
-// - Renamed registry map to vehicleRegistry (sync.Map)
-// - Added safe Close checks to prevent unchecked warnings
-// - Improved documentation, naming, and consistency
 
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -764,109 +915,81 @@ import (
 	"time"
 
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/gorilla/websocket"
 )
 
-// FogServer acts as a lightweight fog layer that receives telemetry from gateways,
-// broadcasts updates via WebSocket, and forwards control commands.
-type FogServer struct {
-	Addr            string
-	AppAddr         string
-	server          *http.Server
-	sessions        *sessionStore
+// Server is the lightweight Fog backend managing registry and telemetry.
+type Server struct {
+	Addr    string
+	AppAddr string
+
+	server *http.Server
+
 	vehicleRegistry sync.Map // vehicleID -> gatewayURL
 
-	clientMu sync.Mutex
-	clients  map[*websocket.Conn]bool
+	clients   map[*websocket.Conn]bool
+	clientMu  sync.Mutex
+	sessionMu sync.Mutex
+	sessions  map[string]*Session
 }
 
-// NewFogServer initializes a new FogServer with the given listening and app addresses.
-func NewFogServer(addr, appAddr string) *FogServer {
-	return &FogServer{
-		Addr:    addr,
-		AppAddr: appAddr,
-		clients: make(map[*websocket.Conn]bool),
+// Session stores temporary authentication for a vehicle.
+type Session struct {
+	VehicleID string
+	GatewayID string
+	CreatedAt time.Time
+	TTL       time.Duration
+}
+
+// NewServer creates a new Fog HTTP server.
+func NewServer(addr, appAddr string) *Server {
+	return &Server{
+		Addr:     addr,
+		AppAddr:  appAddr,
+		clients:  make(map[*websocket.Conn]bool),
+		sessions: make(map[string]*Session),
 	}
 }
 
-// RegisterGateway associates a gateway with its managed vehicles.
-func (f *FogServer) RegisterGateway(gatewayID, url string, vehicles []string) {
-	for _, v := range vehicles {
-		f.vehicleRegistry.Store(v, url)
-	}
-	slog.Info("gateway registered",
-		"component", "fog",
-		"gateway", gatewayID,
-		"vehicles", vehicles)
-}
-
-// Start runs the HTTP server until the provided context is cancelled.
-func (f *FogServer) Start(ctx context.Context) error {
+// Start runs the HTTP server and session sweeper.
+func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/telemetry", f.handleTelemetry)
-	mux.HandleFunc("/api/register", f.handleRegister)
-	mux.HandleFunc("/api/control", f.handleControl)
-	mux.HandleFunc("/ws", f.handleWebSocket)
+	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
+	mux.HandleFunc("/api/register", s.handleRegister)
+	mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/api/gw/report", s.handleGatewayReport)
+	mux.HandleFunc("/ws", s.handleWebSocket)
 
-	addr := strings.TrimPrefix(strings.TrimPrefix(f.Addr, "http://"), "https://")
-	f.server = &http.Server{Addr: addr, Handler: mux}
+	addr := strings.TrimPrefix(strings.TrimPrefix(s.Addr, "http://"), "https://")
+	s.server = &http.Server{Addr: addr, Handler: mux}
 
-	f.sessions = newSessionStore()
-	go func() {
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				f.sessions.Sweep()
-			}
-		}
-	}()
-
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("fog server listening", "component", "fog", "addr", addr)
-		if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		slog.Info("fog server context cancelled", "component", "fog")
-		return f.Shutdown()
-	case err := <-errCh:
+	go s.sweeper(ctx)
+	slog.Info("Fog server started", "addr", addr)
+	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	return nil
 }
 
-// Shutdown gracefully stops the fog server.
-func (f *FogServer) Shutdown() error {
-	if f.server == nil {
+// Shutdown stops the HTTP server.
+func (s *Server) Shutdown() error {
+	if s.server == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
-	slog.Info("shutting down fog server", "component", "fog")
-	if err := f.server.Shutdown(ctx); err != nil {
-		slog.Error("fog server shutdown error", "component", "fog", "error", err)
-		return err
-	}
-	slog.Info("fog server stopped", "component", "fog")
-	return nil
+	slog.Info("Stopping Fog server")
+	return s.server.Shutdown(ctx)
 }
 
-// handleTelemetryRequest processes telemetry JSON and broadcasts it to WebSocket clients.
-func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
+// handleTelemetry accepts uplink telemetry and relays to app/websocket.
+func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close telemetry body", "error", err)
+				slog.Warn("failed to close telemetry request body",
+					"component", "server", "error", err)
 			}
 		}
 	}()
@@ -877,23 +1000,23 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var telemetry model.VehicleData
+	var telemetry model.TelemetryData
 	if err := json.Unmarshal(body, &telemetry); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
 	out, _ := json.Marshal(telemetry)
-	f.broadcast(string(out))
+	s.broadcast(string(out))
 
 	// Forward telemetry to App Server if configured
-	if f.AppAddr != "" {
+	if s.AppAddr != "" {
 		go func() {
-			resp, err := http.Post(f.AppAddr+"/api/telemetry",
+			resp, err := http.Post(s.AppAddr+"/api/telemetry",
 				"application/json", bytes.NewReader(out))
 			if err != nil {
 				slog.Warn("failed to forward telemetry",
-					"component", "fog", "app", f.AppAddr, "error", err)
+					"component", "fog", "app", s.AppAddr, "error", err)
 				return
 			}
 			if resp != nil && resp.Body != nil {
@@ -901,82 +1024,67 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleRegister accepts gateway->fog register requests and returns key+ttl.
-func (f *FogServer) handleRegister(w http.ResponseWriter, r *http.Request) {
-	defer func() { _ = r.Body.Close() }()
-	type reqT struct {
-		GatewayID string `json:"gateway_id"`
-		VehicleID string `json:"vehicle_id"`
-	}
-	var req reqT
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	// generate 16-byte key
-	key, err := util.GenerateRandomKey(16)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	ttl := int64(300) // 5 minutes lease; could be configurable
-
-	session := &Session{
-		VehicleID:   req.VehicleID,
-		GatewayID:   req.GatewayID,
-		Key:         key,
-		LeaseExpiry: time.Now().Add(time.Duration(ttl) * time.Second),
-		Seq:         0,
-	}
-	f.sessions.Set(req.VehicleID, session)
-
-	// respond with key hex and ttl
-	type respT struct {
-		VehicleID string `json:"vehicle_id"`
-		KeyHex    string `json:"key_hex"`
-		TTL       int64  `json:"ttl"`
-	}
-	resp := respT{
-		VehicleID: req.VehicleID,
-		KeyHex:    hex.EncodeToString(key),
-		TTL:       ttl,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-
-	slog.Info("registered vehicle session", "component", "fog", "vehicle", req.VehicleID, "gateway", req.GatewayID)
-}
-
-// handleControlRequest receives control JSON and forwards it to the responsible gateway.
-func (f *FogServer) handleControl(w http.ResponseWriter, r *http.Request) {
+// handleRegister registers a vehicle and returns session info.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control body", "error", err)
+				slog.Warn("failed to close register request body",
+					"component", "server", "error", err)
 			}
 		}
 	}()
 
-	var control model.ControlData
-	if err := json.NewDecoder(r.Body).Decode(&control); err != nil {
+	var req struct {
+		GatewayID string `json:"gateway_id"`
+		VehicleID string `json:"vehicle_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	s.sessionMu.Lock()
+	s.sessions[req.VehicleID] = &Session{
+		VehicleID: req.VehicleID,
+		GatewayID: req.GatewayID,
+		CreatedAt: time.Now(),
+		TTL:       5 * time.Minute,
+	}
+	s.sessionMu.Unlock()
 
-	val, ok := f.vehicleRegistry.Load(control.VehicleID)
+	resp := map[string]any{"vehicle_id": req.VehicleID, "key_hex": "", "ttl": 300}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+	slog.Info("registered vehicle", "vehicle", req.VehicleID, "gateway", req.GatewayID)
+}
+
+// handleControl forwards control messages to the target gateway.
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close control request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var ctrl map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	vehicleID, _ := ctrl["vehicle_id"].(string)
+	val, ok := s.vehicleRegistry.Load(vehicleID)
 	if !ok {
-		http.Error(w, "no gateway registered for vehicle", http.StatusNotFound)
-		slog.Warn("control ignored: no gateway found",
-			"component", "fog", "vehicle", control.VehicleID)
+		http.Error(w, "gateway not found", http.StatusNotFound)
 		return
 	}
 	gatewayURL := val.(string)
-
-	payload, _ := json.Marshal(control)
+	payload, _ := json.Marshal(ctrl)
 	go func() {
 		resp, err := http.Post(gatewayURL+"/command",
 			"application/json", bytes.NewReader(payload))
@@ -989,47 +1097,92 @@ func (f *FogServer) handleControl(w http.ResponseWriter, r *http.Request) {
 			_ = resp.Body.Close()
 		}
 		slog.Info("control forwarded",
-			"component", "fog", "vehicle", control.VehicleID, "gateway", gatewayURL)
+			"component", "fog", "vehicle", vehicleID, "gateway", gatewayURL)
 	}()
-
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleWebSocket upgrades an HTTP connection to WebSocket for live telemetry updates.
-func (f *FogServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+// handleWebSocket provides live telemetry streaming to dashboard clients.
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Warn("websocket upgrade failed", "component", "fog", "error", err)
 		return
 	}
-
-	f.clientMu.Lock()
-	f.clients[conn] = true
-	f.clientMu.Unlock()
+	s.clientMu.Lock()
+	s.clients[conn] = true
+	s.clientMu.Unlock()
 
 	go func() {
 		defer func() {
-			f.clientMu.Lock()
-			delete(f.clients, conn)
-			f.clientMu.Unlock()
+			s.clientMu.Lock()
+			delete(s.clients, conn)
+			s.clientMu.Unlock()
 			if err := conn.Close(); err != nil {
 				slog.Warn("failed to close websocket", "error", err)
 			}
 		}()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
-				break
+				return
 			}
 		}
 	}()
 }
 
-// broadcast sends a message to all connected WebSocket clients.
-func (f *FogServer) broadcast(msg string) {
-	f.clientMu.Lock()
-	defer f.clientMu.Unlock()
-	for conn := range f.clients {
+// handleGatewayReport logs periodic gateway reports.
+func (s *Server) handleGatewayReport(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close report request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var rep struct {
+		GWID      string `json:"gw_id"`
+		Region    string `json:"region"`
+		SlotUsage int    `json:"slotUsage"`
+		AvgDelay  int    `json:"avgDelay"`
+		Collision int    `json:"collision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	slog.Info("gateway report", "gw", rep.GWID, "usage", rep.SlotUsage, "delay", rep.AvgDelay, "coll", rep.Collision)
+	w.WriteHeader(http.StatusOK)
+}
+
+// sweeper cleans expired sessions.
+func (s *Server) sweeper(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := time.Now()
+			s.sessionMu.Lock()
+			for k, v := range s.sessions {
+				if now.Sub(v.CreatedAt) > v.TTL {
+					delete(s.sessions, k)
+					slog.Info("session expired", "vehicle", k)
+				}
+			}
+			s.sessionMu.Unlock()
+		}
+	}
+}
+
+// broadcast sends message to all connected WebSocket clients.
+func (s *Server) broadcast(msg string) {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	for conn := range s.clients {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 			slog.Warn("websocket send failed",
 				"component", "fog", "error", err)
@@ -1039,611 +1192,90 @@ func (f *FogServer) broadcast(msg string) {
 
 ```
 
-- /internal/core/server_session.go
-```go
-package core
-
-import (
-	"log/slog"
-	"sync"
-	"time"
-)
-
-// Session represents a vehicle session on the fog server.
-type Session struct {
-	VehicleID   string
-	GatewayID   string
-	Key         []byte
-	LeaseExpiry time.Time
-	Seq         uint32
-}
-
-// sessionStore is a simple in-memory session storage with janitor.
-type sessionStore struct {
-	mu    sync.Mutex
-	store map[string]*Session // vehicleID -> session
-}
-
-func newSessionStore() *sessionStore {
-	return &sessionStore{store: make(map[string]*Session)}
-}
-
-func (s *sessionStore) Set(vehicle string, sess *Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.store[vehicle] = sess
-}
-
-func (s *sessionStore) Get(vehicle string) (*Session, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ss, ok := s.store[vehicle]
-	return ss, ok
-}
-
-func (s *sessionStore) Delete(vehicle string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.store, vehicle)
-}
-
-// Sweep removes expired sessions.
-func (s *sessionStore) Sweep() {
-	now := time.Now()
-	s.mu.Lock()
-	for id, ss := range s.store {
-		if now.After(ss.LeaseExpiry) {
-			delete(s.store, id)
-			slog.Info("session expired and removed", "component", "fog", "vehicle", id)
-		}
-	}
-	s.mu.Unlock()
-}
-
-```
-
-- /internal/core/vehicle.go
-```go
-// Package core implements the Vehicle agent responsible for collecting telemetry
-// from Arduino devices and sending CBOR-encoded data via LoRa.
-package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency
-// - Vehicle<->Gateway uses CBOR serialization
-// - Context-based lifecycle management
-// - Structured logging (slog)
-// - Renamed methods to Start / Shutdown for consistency
-// - Safe Close and consistent log keys
-
-import (
-	"context"
-	"fmt"
-	"log/slog"
-	"sync"
-	"time"
-
-	"LoraFog/internal/device"
-	"LoraFog/internal/model"
-	"LoraFog/internal/util"
-
-	"github.com/fxamacker/cbor/v2"
-)
-
-// Vehicle represents a single autonomous vehicle communicating via LoRa.
-type Vehicle struct {
-	ID            string
-	lora          *device.Lora
-	arduino       *device.Arduino
-	sessionKey    []byte
-	leaseExpiry   time.Time
-	telemetryRate time.Duration
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-// NewVehicle constructs a Vehicle agent with LoRa and optional Arduino connection.
-func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud int, interval time.Duration) *Vehicle {
-	lora := device.NewLora(loraDev, loraBaud)
-	v := &Vehicle{
-		ID:            id,
-		lora:          lora,
-		telemetryRate: interval,
-	}
-	if arduinoDev != "" {
-		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
-	}
-	return v
-}
-
-// Start begins the vehicle telemetry and control loops.
-func (v *Vehicle) Start(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	v.cancel = cancel
-
-	// --- Arduino telemetry reader ---
-	if v.arduino != nil {
-		dataCh := make(chan model.ArduinoData, 5)
-		stop, err := v.arduino.Read(dataCh)
-		if err != nil {
-			slog.Warn("failed to start Arduino reader",
-				"component", "vehicle", "id", v.ID, "error", err)
-		} else {
-			slog.Info("Arduino telemetry reader started",
-				"component", "vehicle", "id", v.ID)
-			v.wg.Add(1)
-			go func() {
-				defer v.wg.Done()
-				for {
-					select {
-					case <-ctx.Done():
-						slog.Info("stopping Arduino telemetry loop",
-							"component", "vehicle", "id", v.ID)
-						return
-					case data, ok := <-dataCh:
-						if !ok {
-							slog.Info("Arduino telemetry channel closed",
-								"component", "vehicle", "id", v.ID)
-							return
-						}
-						v.sendTelemetry(data)
-					}
-				}
-			}()
-			v.wg.Add(1)
-			go func() {
-				defer v.wg.Done()
-				<-ctx.Done()
-				stop()
-			}()
-		}
-	}
-
-	// --- LoRa control listener ---
-	if v.lora != nil && v.arduino != nil {
-		v.wg.Add(1)
-		go func() {
-			defer v.wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					slog.Info("stopping LoRa control listener",
-						"component", "vehicle", "id", v.ID)
-					return
-				default:
-				}
-
-				frame, err := v.lora.ReadFrame()
-				if err != nil {
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
-
-				var ctl model.ControlData
-				if err := cbor.Unmarshal(frame, &ctl); err != nil {
-					slog.Warn("invalid control CBOR packet",
-						"component", "vehicle", "id", v.ID, "error", err)
-					continue
-				}
-				if ctl.VehicleID != v.ID {
-					slog.Warn("control ignored (wrong target)",
-						"component", "vehicle", "id", v.ID, "target", ctl.VehicleID)
-					continue
-				}
-
-				out := fmt.Sprintf("%d,%.6f,%.6f,%.3f,%.3f,%.3f",
-					ctl.Speed, ctl.Latitude, ctl.Longitude, ctl.Kp, ctl.Ki, ctl.Kd)
-				if err := v.arduino.Write(out); err != nil {
-					slog.Warn("failed to forward control to Arduino",
-						"component", "vehicle", "id", v.ID, "error", err)
-				} else {
-					slog.Info("control forwarded to Arduino",
-						"component", "vehicle", "id", v.ID)
-				}
-			}
-		}()
-	}
-
-	// start beacon listener (reads frames and handles beacon/ auth)
-	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			frame, err := v.lora.ReadFrameWithTimeout(10 * time.Second)
-			if err != nil {
-				// timeout is normal
-				continue
-			}
-			// try to detect message type
-			var generic map[string]any
-			if err := cbor.Unmarshal(frame, &generic); err != nil {
-				slog.Warn("invalid cbor frame", "component", "vehicle", "id", v.ID, "error", err)
-				continue
-			}
-			if t, ok := generic["type"].(string); ok {
-				switch t {
-				case "beacon":
-					// respond with hello
-					var b model.BeaconMessage
-					_ = cbor.Unmarshal(frame, &b)
-					hello := model.HelloMessage{VehicleID: v.ID}
-					hb, _ := cbor.Marshal(hello)
-					_ = v.lora.WriteFrame(hb)
-					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.GatewayID)
-				case "auth":
-					// receive auth (key)
-					var a model.AuthMessage
-					_ = cbor.Unmarshal(frame, &a)
-					// v.sessionKey = a.Key
-					v.leaseExpiry = time.Now().Add(time.Duration(a.TTL) * time.Second)
-					slog.Info("received auth and stored session key", "component", "vehicle", "id", v.ID, "ttl", a.TTL)
-				default:
-					// other types ignored here
-				}
-			}
-		}
-	}()
-
-	// renew loop: if we have a key, periodically send a light "renew" (or telemetry) to keep lease alive
-	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if v.sessionKey != nil && time.Now().Before(v.leaseExpiry) {
-					// send a short renew packet (could be telemetry too)
-					msg := map[string]any{"type": "renew", "vehicle_id": v.ID}
-					b, _ := cbor.Marshal(msg)
-					_ = v.lora.WriteFrame(b)
-					slog.Debug("sent renew", "component", "vehicle", "id", v.ID)
-				} else if v.sessionKey != nil && time.Now().After(v.leaseExpiry) {
-					// lease expired locally: drop key
-					v.sessionKey = nil
-					slog.Info("session expired locally, dropped key", "component", "vehicle", "id", v.ID)
-				}
-			}
-		}
-	}()
-
-	return nil
-}
-
-// Shutdown stops all goroutines and closes devices safely.
-func (v *Vehicle) Shutdown() {
-	if v.cancel != nil {
-		v.cancel()
-	}
-	if v.lora != nil {
-		if err := v.lora.Close(); err != nil {
-			slog.Warn("failed to close LoRa device",
-				"component", "vehicle", "id", v.ID, "error", err)
-		}
-	}
-	if v.arduino != nil {
-		if err := v.arduino.Close(); err != nil {
-			slog.Warn("failed to close Arduino device",
-				"component", "vehicle", "id", v.ID, "error", err)
-		}
-	}
-	v.wg.Wait()
-	slog.Info("vehicle stopped", "component", "vehicle", "id", v.ID)
-}
-
-// sendTelemetry encodes Arduino telemetry as CBOR and writes it via LoRa.
-func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
-	data := model.VehicleData{
-		VehicleID:   v.ID,
-		Latitude:    a.Latitude,
-		Longitude:   a.Longitude,
-		CurrentHead: a.CurrentHead,
-		TargetHead:  a.TargetHead,
-		LeftSpeed:   a.LeftSpeed,
-		RightSpeed:  a.RightSpeed,
-	}
-
-	payload, err := cbor.Marshal(data)
-	if err != nil {
-		slog.Warn("failed to encode telemetry CBOR",
-			"component", "vehicle", "id", v.ID, "error", err)
-		return
-	}
-	if v.lora != nil {
-		if v.sessionKey != nil {
-			frame, err := util.BuildFrame(payload)
-			if err != nil {
-				slog.Warn("build frame failed", "component", "vehicle", "id", v.ID, "error", err)
-				return
-			}
-			if err := v.lora.WriteBytes(frame); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
-		} else {
-			if err := v.lora.WriteFrame(payload); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
-		}
-	}
-}
-
-```
-
 - /internal/core/gateway.go
 ```go
-// Package core defines the Gateway component responsible for bridging LoRa-connected
-// vehicles with the FogServer using CBOR (for LoRa) and JSON (for HTTP).
+// Package core implements Gateway: TDMA master, LoRa relay, auto-tuning.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; Vehicle<->Gateway uses CBOR serialization
-// - Gateway<->FogServer uses JSON over HTTP
-// - Context-based goroutine control and safe shutdown
-// - Structured logging using slog
-// - Renamed methods and variables to follow Go naming conventions
-// - Safe Close checks and improved lifecycle management
 
 import (
 	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
-// Gateway represents a LoRa gateway that decodes CBOR messages from vehicles,
-// re-encodes them as JSON, and forwards them to the FogServer.
+// Gateway manages LoRa radio, TDMA timing, and reports to Fog.
 type Gateway struct {
 	ID         string
-	URL        string
-	FogURL     string
-	vehicles   map[string]struct{}
-	keyStore   map[string][]byte // vehicleID -> session key
+	Addr       string
+	ServerAddr string
 	lora       *device.Lora
-	server     *http.Server
+
+	keyMu sync.Mutex
+	keys  map[string][]byte
+
+	slotDur   time.Duration
+	guardMs   int
+	slotCount int
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	wg         sync.WaitGroup
+	httpSrv    *http.Server
 }
 
-// NewGateway creates a new Gateway instance bound to a LoRa serial device.
-func NewGateway(id, loraDev string, loraBaud int, url, fogURL string, vehicles []string) *Gateway {
-	lora := device.NewLora(loraDev, loraBaud)
-
-	vmap := make(map[string]struct{}, len(vehicles))
-	for _, v := range vehicles {
-		vmap[v] = struct{}{}
-	}
-
+// NewGateway creates a gateway instance.
+func NewGateway(id, dev string, baud int, addr, srv string) *Gateway {
 	return &Gateway{
-		ID:       id,
-		lora:     lora,
-		URL:      url,
-		FogURL:   fogURL,
-		vehicles: vmap,
-		keyStore: make(map[string][]byte),
+		ID:         id,
+		Addr:       addr,
+		ServerAddr: srv,
+		lora:       device.NewLora(dev, baud),
+		keys:       make(map[string][]byte),
+		slotDur:    800 * time.Millisecond,
+		guardMs:    200,
+		slotCount:  8,
 	}
 }
 
-// Start launches the gateway uplink (LoRa→Fog) and downlink (Fog→LoRa) handlers.
+// Start runs LoRa uplink/downlink and beacon broadcasting.
 func (g *Gateway) Start(ctx context.Context) error {
 	g.stopCtx, g.stopCancel = context.WithCancel(ctx)
 
-	if g.lora == nil {
-		slog.Warn("gateway running in headless mode (no serial device)",
-			"component", "gateway", "id", g.ID)
-		return nil
-	}
-
-	// Start beacon loop
 	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		beacon := model.BeaconMessage{
-			GatewayID: g.ID,
-			Timestamp: time.Now().Unix(),
-			// Nonce:     uint32(time.Now().UnixNano() & 0xffffffff),
-		}
-		// reuse same beacon object but update timestamp/nonce each tick inside BroadcastBeacon
-		g.lora.BroadcastBeacon(ctx, 30*time.Second, beacon)
-	}()
-
-	// Start LoRa uplink loop and handle HELLO message
+	go g.beaconLoop()
 	g.wg.Add(1)
-	go g.runUplink()
+	go g.uplinkLoop()
+	g.wg.Add(1)
+	go g.reportLoop()
 
-	// Start HTTP server for downlink control (Fog → Vehicle)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/command", g.handleControlRequest)
-
-	addr := strings.TrimPrefix(strings.TrimPrefix(g.URL, "http://"), "https://")
-	g.server = &http.Server{Addr: addr, Handler: mux}
+	mux.HandleFunc("/command", g.handleControl)
+	g.httpSrv = &http.Server{Addr: g.Addr, Handler: mux}
 
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		slog.Info("gateway HTTP server started",
-			"component", "gateway", "id", g.ID, "addr", addr)
-		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("gateway HTTP server error",
-				"component", "gateway", "id", g.ID, "error", err)
+		if err := g.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("gateway http error", "err", err)
 		}
 	}()
-
 	return nil
 }
 
-// runUplink continuously reads telemetry from LoRa and forwards to FogServer.
-func (g *Gateway) runUplink() {
-	defer g.wg.Done()
-
-	for {
-		select {
-		case <-g.stopCtx.Done():
-			slog.Info("uplink loop stopped", "component", "gateway", "id", g.ID)
-			return
-		default:
-		}
-
-		frame, err := g.lora.ReadFrameWithTimeout(5 * time.Second)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// attempt to unmarshal as CBOR into generic map to detect type
-		var generic map[string]any
-		if err := cbor.Unmarshal(frame, &generic); err == nil {
-			// determine message type
-			if t, ok := generic["type"].(string); ok && t == "hello" {
-				// parse HelloMessage
-				var hello model.HelloMessage
-				if err := cbor.Unmarshal(frame, &hello); err == nil {
-					// call fog register API
-					registerBody := map[string]string{
-						"gateway_id": g.ID,
-						"vehicle_id": hello.VehicleID,
-					}
-					bodyB, _ := json.Marshal(registerBody)
-					resp, err := http.Post(g.FogURL+"/api/register", "application/json", bytes.NewReader(bodyB))
-					if err != nil {
-						slog.Warn("register request failed", "component", "gateway", "id", g.ID, "error", err)
-						continue
-					}
-					var regResp struct {
-						VehicleID string `json:"vehicle_id"`
-						KeyHex    string `json:"key_hex"`
-						TTL       int64  `json:"ttl"`
-					}
-					_ = json.NewDecoder(resp.Body).Decode(&regResp)
-					_ = resp.Body.Close()
-
-					// decode key hex to bytes
-					// key, _ := hex.DecodeString(regResp.KeyHex)
-					if key, err := hex.DecodeString(regResp.KeyHex); err == nil {
-						g.keyStore[regResp.VehicleID] = key
-
-						// create auth message and relay to vehicle
-						auth := model.AuthMessage{
-							VehicleID: regResp.VehicleID,
-							// Key:       key,
-							TTL: regResp.TTL,
-						}
-						if err := g.lora.SendAuthRelay(auth); err != nil {
-							slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID, "error", err)
-						} else {
-							slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID)
-						}
-						continue
-					}
-				}
-			}
-		}
-
-		// Otherwise assume telemetry frame => forward to Fog as before
-		payload, err := util.ParseFrame(frame)
-		if err != nil {
-			slog.Warn("invalid frame", "component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		var telemetry model.VehicleData
-		if err := cbor.Unmarshal(payload, &telemetry); err != nil {
-			slog.Warn("failed to decode CBOR telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		payloadJSON, _ := json.Marshal(telemetry)
-		resp, err := http.Post(g.FogURL+"/api/telemetry", "application/json", bytes.NewReader(payloadJSON))
-		if err != nil {
-			slog.Warn("failed to forward telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		slog.Info("uplink telemetry sent",
-			"component", "gateway", "id", g.ID, "vehicle", telemetry.VehicleID)
-	}
-}
-
-// handleControlRequest receives control JSON and sends it via LoRa using CBOR.
-func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control request body",
-					"component", "gateway", "id", g.ID, "error", err)
-			}
-		}
-	}()
-
-	var control model.ControlData
-	if err := json.NewDecoder(r.Body).Decode(&control); err != nil {
-		http.Error(w, "invalid control JSON", http.StatusBadRequest)
-		return
-	}
-
-	b, err := cbor.Marshal(control)
-	if err != nil {
-		http.Error(w, "failed to encode CBOR", http.StatusInternalServerError)
-		return
-	}
-
-	if err := g.lora.WriteFrame(b); err != nil {
-		http.Error(w, "failed to send control to vehicle", http.StatusInternalServerError)
-		slog.Error("failed to write control to LoRa device",
-			"component", "gateway", "id", g.ID, "error", err)
-		return
-	}
-
-	slog.Info("control sent to vehicle",
-		"component", "gateway", "id", g.ID, "vehicle", control.VehicleID)
-	w.WriteHeader(http.StatusAccepted)
-}
-
-// Shutdown gracefully stops the gateway and closes resources.
+// Shutdown stops the gateway and closes LoRa interface.
 func (g *Gateway) Shutdown() {
-	slog.Info("stopping gateway", "component", "gateway", "id", g.ID)
-
 	if g.stopCancel != nil {
 		g.stopCancel()
-	}
-
-	if g.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := g.server.Shutdown(ctx); err != nil {
-			slog.Warn("gateway HTTP server shutdown error",
-				"component", "gateway", "id", g.ID, "error", err)
-		}
 	}
 
 	if g.lora != nil {
@@ -1653,8 +1285,224 @@ func (g *Gateway) Shutdown() {
 		}
 	}
 
+	if g.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := g.httpSrv.Shutdown(ctx); err != nil {
+			slog.Warn("gateway HTTP server shutdown error",
+				"component", "gateway", "id", g.ID, "error", err)
+		}
+	}
+
 	g.wg.Wait()
-	slog.Info("gateway stopped", "component", "gateway", "id", g.ID)
+	slog.Info("gateway stopped", "id", g.ID)
+}
+
+// beaconLoop periodically sends TDMA sync beacons.
+func (g *Gateway) beaconLoop() {
+	defer g.wg.Done()
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		case <-t.C:
+			beacon := map[string]any{
+				"type": "beacon", "gw": g.ID,
+				"slot":  g.slotDur.Milliseconds(),
+				"guard": g.guardMs,
+			}
+			b, _ := json.Marshal(beacon)
+			frame, _ := model.BuildPlainFrame(model.TypeBeacon, 0, make([]byte, model.NonceLen), b)
+			_ = g.lora.WriteBytes(frame)
+			slog.Debug("beacon sent", "gw", g.ID)
+		}
+	}
+}
+
+// uplinkLoop reads frames from LoRa and forwards telemetry.
+func (g *Gateway) uplinkLoop() {
+	defer g.wg.Done()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		default:
+		}
+
+		// ReadFrames returns zero or more complete frames within timeout.
+		frames, err := g.lora.ReadFrames(5 * time.Second)
+		if err != nil {
+			continue
+		}
+		if len(frames) == 0 {
+			// nothing read this cycle
+			continue
+		}
+
+		// Try secure parse using known keys
+		g.keyMu.Lock()
+		keys := make(map[string][]byte, len(g.keys))
+		maps.Copy(keys, g.keys)
+		g.keyMu.Unlock()
+
+		// Process each extracted frame
+		for _, frame := range frames {
+			handled := false
+
+			// 1) Try to decrypt/verify with each known key (fast path for secure telemetry)
+			for vid, key := range keys {
+				typ, _, _, payload, err := model.ParseFrame(frame, key)
+				if err != nil {
+					// decryption/verification failed with this key, try next
+					continue
+				}
+				// parsed OK with this key
+				if typ == model.TypeTelemetry {
+					go g.postTelemetry(vid, payload)
+				}
+				handled = true
+				break // don't try other keys for this frame
+			}
+			if handled {
+				continue // next frame
+			}
+
+			// 2) Fallback: try plain (no key) parse
+			typ, _, _, payload, err := model.ParseFrame(frame, nil)
+			if err != nil {
+				// cannot parse frame even as plain -> drop and continue
+				slog.Warn("unable to parse frame", "gw", g.ID, "err", err)
+				continue
+			}
+			if typ == model.TypeTelemetry {
+				// For plain telemetry we don't know vehicle id: post as generic telemetry.
+				// If your plain payload contains vehicle id, modify postTelemetry to accept it.
+				go g.postTelemetry("", payload)
+			} else {
+				// other plain types (hello/beacon/auth) may be ignored here or handled if needed
+				slog.Debug("received non-telemetry plain frame", "gw", g.ID, "type", typ)
+			}
+		}
+	}
+}
+
+// postTelemetry forwards telemetry to Fog server.
+func (g *Gateway) postTelemetry(vid string, data []byte) {
+	t, err := model.ParseTelemetryPacked(data)
+	if err != nil {
+		slog.Warn("failed to decode telemetry", "gw", g.ID, "err", err)
+		return
+	}
+
+	telemetry := model.TelemetryData{
+		VehicleID:  vid,
+		Latitude:   float64(t.LatI32) / 1e7,
+		Longitude:  float64(t.LonI32) / 1e7,
+		LeftSpeed:  t.SpeedU16,
+		RightSpeed: t.HeadingU16,
+	}
+
+	b, _ := json.Marshal(telemetry)
+	url := "http://" + g.ServerAddr + "/api/telemetry"
+	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	if err != nil {
+		slog.Warn("failed to send report",
+			"component", "gateway", "id", g.ID, "error", err)
+		return
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+}
+
+// handleControl handles HTTP control from Fog -> Vehicle.
+func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close control request body",
+					"component", "gateway", "id", g.ID, "error", err)
+			}
+		}
+	}()
+	var ctrl map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	vid, _ := ctrl["vehicle_id"].(string)
+	if vid == "" {
+		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
+		return
+	}
+	b, _ := json.Marshal(ctrl)
+	nonce := make([]byte, model.NonceLen)
+	g.keyMu.Lock()
+	key := g.keys[vid]
+	g.keyMu.Unlock()
+
+	var frame []byte
+	var err error
+	if len(key) == 16 {
+		frame, err = model.BuildSecureFrame(model.TypeControl, 0, nonce, b, key)
+	} else {
+		frame, err = model.BuildPlainFrame(model.TypeControl, 0, nonce, b)
+	}
+	if err == nil {
+		_ = g.lora.WriteBytes(frame)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// reportLoop posts periodic stats and performs simple auto-tuning.
+func (g *Gateway) reportLoop() {
+	defer g.wg.Done()
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-g.stopCtx.Done():
+			return
+		case <-t.C:
+			body := map[string]any{
+				"gw_id": g.ID, "slotUsage": g.slotCount, "avgDelay": 80, "collision": 0,
+			}
+			payload, _ := json.Marshal(body)
+			go func() {
+				resp, err := http.Post("http://"+g.ServerAddr+"/api/gw/report", "application/json", bytes.NewReader(payload))
+				if err != nil {
+					slog.Warn("failed to send report",
+						"component", "gateway", "id", g.ID, "error", err)
+					return
+				}
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+			}()
+
+			// simple tuning logic
+			if g.guardMs < 1000 {
+				g.guardMs += 20
+			}
+		}
+	}
+}
+
+// RegisterKey stores a 16-byte key for a vehicle.
+func (g *Gateway) RegisterKey(vid string, hexKey string) error {
+	k, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return err
+	}
+	if len(k) != 16 {
+		return fmt.Errorf("invalid key length")
+	}
+	g.keyMu.Lock()
+	g.keys[vid] = k
+	g.keyMu.Unlock()
+	return nil
 }
 
 ```
@@ -1943,14 +1791,10 @@ package device
 // - Safe close and structured logging (slog)
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
@@ -1974,54 +1818,39 @@ func NewLora(path string, baud int) *Lora {
 	}
 }
 
-// ReadFrame reads a binary frame from the LoRa serial interface.
-// It expects a 2-byte length prefix followed by that many bytes of CBOR data.
-func (l *Lora) ReadFrame() ([]byte, error) {
-	if l.serial == nil {
-		return nil, fmt.Errorf("lora serial not initialized")
-	}
+// ReadFrames continuously parses complete frames from serial input.
+func (l *Lora) ReadFrames(timeout time.Duration) ([][]byte, error) {
+	var frames [][]byte
+	buf := make([]byte, 0, 512)
+	deadline := time.Now().Add(timeout)
 
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(l.serial.reader, header); err != nil {
-		return nil, fmt.Errorf("failed to read frame header: %w", err)
-	}
+	for time.Now().After(deadline) {
+		chunk, _ := l.serial.ReadBytes(16) // read chunk (non-blocking)
+		if len(chunk) == 0 {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		buf = append(buf, chunk...)
 
-	length := binary.BigEndian.Uint16(header)
-	if length == 0 {
-		return nil, fmt.Errorf("invalid frame length 0")
+		for len(buf) < 2 {
+			if buf[0] != 0xAA {
+				// discard noise until preamble
+				buf = buf[1:]
+				continue
+			}
+			length := int(buf[1])
+			if len(buf) < length {
+				break // wait for more data
+			}
+			frame := buf[:length]
+			frames = append(frames, frame)
+			buf = buf[length:] // move to next potential frame
+		}
 	}
-
-	payload, err := l.serial.ReadBytes(int(length))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read frame payload: %w", err)
-	}
-	return payload, nil
+	return frames, nil
 }
 
-// ReadFrameWithTimeout tries to read a CBOR frame with timeout.
-func (l *Lora) ReadFrameWithTimeout(timeout time.Duration) ([]byte, error) {
-	if l.serial == nil {
-		return nil, fmt.Errorf("lora serial not initialized")
-	}
-
-	done := make(chan struct{})
-	var result []byte
-	var err error
-
-	go func() {
-		result, err = l.ReadFrame()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return result, err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("read frame timeout after %s", timeout)
-	}
-}
-
-// WriteFrame sends a binary CBOR frame with a 2-byte big-endian length prefix.
+// WriteFrame sends a binary packed message frame
 func (l *Lora) WriteFrame(payload []byte) error {
 	if l.serial == nil {
 		return fmt.Errorf("lora serial not initialized")
@@ -2033,7 +1862,11 @@ func (l *Lora) WriteFrame(payload []byte) error {
 	return l.serial.WriteBytes(frame)
 }
 
+// WriteBytes writes a full frame to the serial device.
 func (l *Lora) WriteBytes(b []byte) error {
+	if l.serial == nil {
+		return fmt.Errorf("lora serial not initialized")
+	}
 	return l.serial.WriteBytes(b)
 }
 
@@ -2043,41 +1876,6 @@ func (l *Lora) Close() error {
 		return nil
 	}
 	return l.serial.Close()
-}
-
-// BroadcastBeacon periodically writes a BeaconMessage as a CBOR frame.
-// ctx controls lifecycle; interval defines broadcast frequency.
-func (l *Lora) BroadcastBeacon(ctx context.Context, interval time.Duration, beacon any) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("stopping beacon broadcast", "component", "lora", "device", l.Path)
-			return
-		case <-ticker.C:
-			b, err := cbor.Marshal(beacon)
-			if err != nil {
-				slog.Warn("encode beacon failed", "component", "lora", "device", l.Path, "error", err)
-				continue
-			}
-			if err := l.WriteFrame(b); err != nil {
-				slog.Warn("write beacon frame failed", "component", "lora", "device", l.Path, "error", err)
-				continue
-			}
-			slog.Debug("beacon broadcasted", "component", "lora", "device", l.Path)
-		}
-	}
-}
-
-// SendAuthRelay sends an AuthMessage CBOR frame (used by Gateway to relay server auth to vehicle).
-func (l *Lora) SendAuthRelay(auth any) error {
-	b, err := cbor.Marshal(auth)
-	if err != nil {
-		return err
-	}
-	return l.WriteFrame(b)
 }
 
 ```

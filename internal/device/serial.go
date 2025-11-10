@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,41 @@ func (s *Serial) ReadBytes(n int) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	return buf, nil
+}
+
+func (s *Serial) ReadBytesTimeout(n int, timeout time.Duration) ([]byte, error) {
+	if s.Port == nil {
+		return nil, errors.New("serial port not initialized")
+	}
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 0, n)
+	tmp := make([]byte, 128)
+	for len(buf) < n && time.Now().Before(deadline) {
+		if err := s.Port.SetReadTimeout(time.Until(deadline)); err != nil {
+			return nil, fmt.Errorf("SetReadTimeout failed: %w", err)
+		}
+		r, err := s.reader.Read(tmp)
+		if r > 0 {
+			if len(buf)+r > n {
+				buf = append(buf, tmp[:n-len(buf)]...)
+			} else {
+				buf = append(buf, tmp[:r]...)
+			}
+			if len(buf) >= n {
+				break
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+				continue
+			}
+			return nil, err
+		}
+	}
+	if len(buf) == 0 {
+		return nil, errors.New("serial read timeout")
 	}
 	return buf, nil
 }

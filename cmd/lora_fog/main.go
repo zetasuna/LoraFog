@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -86,8 +85,5 @@ func loadAndValidateConfig(path string) (*model.Config, error) {
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, errors.New("configuration invalid: " + err.Error())
-	}
 	return &cfg, nil
 }

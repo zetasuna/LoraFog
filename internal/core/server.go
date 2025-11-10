@@ -1,19 +1,9 @@
-// Package core defines the Server, which bridges gateways and application layers
-// via HTTP and WebSocket communication.
+// Package core implements the Fog server — registry, WebSocket, telemetry & control APIs.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; JSON only for external communication
-// - Context-based lifecycle management
-// - Structured logging via slog
-// - Renamed registry map to vehicleRegistry (sync.Map)
-// - Added safe Close checks to prevent unchecked warnings
-// - Improved documentation, naming, and consistency
 
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -23,110 +13,81 @@ import (
 	"time"
 
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/gorilla/websocket"
 )
 
-// Server acts as a lightweight fog layer that receives telemetry from gateways,
-// broadcasts updates via WebSocket, and forwards control commands.
+// Server is the lightweight Fog backend managing registry and telemetry.
 type Server struct {
-	Addr            string
-	AppAddr         string
-	server          *http.Server
-	sessions        *sessionStore
+	Addr    string
+	AppAddr string
+
+	server *http.Server
+
 	vehicleRegistry sync.Map // vehicleID -> gatewayURL
 
-	clientMu sync.Mutex
-	clients  map[*websocket.Conn]bool
+	clients   map[*websocket.Conn]bool
+	clientMu  sync.Mutex
+	sessionMu sync.Mutex
+	sessions  map[string]*Session
 }
 
-// NewServer initializes a new Server with the given listening and app addresses.
+// Session stores temporary authentication for a vehicle.
+type Session struct {
+	VehicleID string
+	GatewayID string
+	CreatedAt time.Time
+	TTL       time.Duration
+}
+
+// NewServer creates a new Fog HTTP server.
 func NewServer(addr, appAddr string) *Server {
 	return &Server{
-		Addr:    addr,
-		AppAddr: appAddr,
-		clients: make(map[*websocket.Conn]bool),
+		Addr:     addr,
+		AppAddr:  appAddr,
+		clients:  make(map[*websocket.Conn]bool),
+		sessions: make(map[string]*Session),
 	}
 }
 
-// RegisterGateway associates a gateway with its managed vehicles.
-func (s *Server) RegisterGateway(gatewayID, url string, vehicles []string) {
-	for _, v := range vehicles {
-		s.vehicleRegistry.Store(v, url)
-	}
-	slog.Info("gateway registered",
-		"component", "fog",
-		"gateway", gatewayID,
-		"vehicles", vehicles,
-	)
-}
-
-// Start runs the HTTP server until the provided context is cancelled.
+// Start runs the HTTP server and session sweeper.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
 	mux.HandleFunc("/api/register", s.handleRegister)
 	mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/api/gw/report", s.handleGatewayReport)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
 	addr := strings.TrimPrefix(strings.TrimPrefix(s.Addr, "http://"), "https://")
 	s.server = &http.Server{Addr: addr, Handler: mux}
 
-	s.sessions = newSessionStore()
-	go func() {
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				s.sessions.Sweep()
-			}
-		}
-	}()
-
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("fog server listening", "component", "fog", "addr", addr)
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		slog.Info("fog server context cancelled", "component", "fog")
-		return s.Shutdown()
-	case err := <-errCh:
+	go s.sweeper(ctx)
+	slog.Info("Fog server started", "addr", addr)
+	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	return nil
 }
 
-// Shutdown gracefully stops the fog server.
+// Shutdown stops the HTTP server.
 func (s *Server) Shutdown() error {
 	if s.server == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
-	slog.Info("shutting down fog server", "component", "fog")
-	if err := s.server.Shutdown(ctx); err != nil {
-		slog.Error("fog server shutdown error", "component", "fog", "error", err)
-		return err
-	}
-	slog.Info("fog server stopped", "component", "fog")
-	return nil
+	slog.Info("Stopping Fog server")
+	return s.server.Shutdown(ctx)
 }
 
-// handleTelemetryRequest processes telemetry JSON and broadcasts it to WebSocket clients.
+// handleTelemetry accepts uplink telemetry and relays to app/websocket.
 func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close telemetry body", "error", err)
+				slog.Warn("failed to close telemetry request body",
+					"component", "server", "error", err)
 			}
 		}
 	}()
@@ -137,7 +98,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var telemetry model.VehicleData
+	var telemetry model.TelemetryData
 	if err := json.Unmarshal(body, &telemetry); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -161,82 +122,67 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleRegister accepts gateway->fog register requests and returns key+ttl.
+// handleRegister registers a vehicle and returns session info.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	defer func() { _ = r.Body.Close() }()
-	type reqT struct {
-		GatewayID string `json:"gateway_id"`
-		VehicleID string `json:"vehicle_id"`
-	}
-	var req reqT
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	// generate 16-byte key
-	key, err := util.GenerateRandomKey(16)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	ttl := int64(300) // 5 minutes lease; could be configurable
-
-	session := &Session{
-		VehicleID:   req.VehicleID,
-		GatewayID:   req.GatewayID,
-		Key:         key,
-		LeaseExpiry: time.Now().Add(time.Duration(ttl) * time.Second),
-		Seq:         0,
-	}
-	s.sessions.Set(req.VehicleID, session)
-
-	// respond with key hex and ttl
-	type respT struct {
-		VehicleID string `json:"vehicle_id"`
-		KeyHex    string `json:"key_hex"`
-		TTL       int64  `json:"ttl"`
-	}
-	resp := respT{
-		VehicleID: req.VehicleID,
-		KeyHex:    hex.EncodeToString(key),
-		TTL:       ttl,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-
-	slog.Info("registered vehicle session", "component", "fog", "vehicle", req.VehicleID, "gateway", req.GatewayID)
-}
-
-// handleControlRequest receives control JSON and forwards it to the responsible gateway.
-func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control body", "error", err)
+				slog.Warn("failed to close register request body",
+					"component", "server", "error", err)
 			}
 		}
 	}()
 
-	var control model.ControlData
-	if err := json.NewDecoder(r.Body).Decode(&control); err != nil {
+	var req struct {
+		GatewayID string `json:"gateway_id"`
+		VehicleID string `json:"vehicle_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	s.sessionMu.Lock()
+	s.sessions[req.VehicleID] = &Session{
+		VehicleID: req.VehicleID,
+		GatewayID: req.GatewayID,
+		CreatedAt: time.Now(),
+		TTL:       5 * time.Minute,
+	}
+	s.sessionMu.Unlock()
 
-	val, ok := s.vehicleRegistry.Load(control.VehicleID)
+	resp := map[string]any{"vehicle_id": req.VehicleID, "key_hex": "", "ttl": 300}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+	slog.Info("registered vehicle", "vehicle", req.VehicleID, "gateway", req.GatewayID)
+}
+
+// handleControl forwards control messages to the target gateway.
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close control request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var ctrl map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	vehicleID, _ := ctrl["vehicle_id"].(string)
+	val, ok := s.vehicleRegistry.Load(vehicleID)
 	if !ok {
-		http.Error(w, "no gateway registered for vehicle", http.StatusNotFound)
-		slog.Warn("control ignored: no gateway found",
-			"component", "fog", "vehicle", control.VehicleID)
+		http.Error(w, "gateway not found", http.StatusNotFound)
 		return
 	}
 	gatewayURL := val.(string)
-
-	payload, _ := json.Marshal(control)
+	payload, _ := json.Marshal(ctrl)
 	go func() {
 		resp, err := http.Post(gatewayURL+"/command",
 			"application/json", bytes.NewReader(payload))
@@ -249,21 +195,18 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 			_ = resp.Body.Close()
 		}
 		slog.Info("control forwarded",
-			"component", "fog", "vehicle", control.VehicleID, "gateway", gatewayURL)
+			"component", "fog", "vehicle", vehicleID, "gateway", gatewayURL)
 	}()
-
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleWebSocket upgrades an HTTP connection to WebSocket for live telemetry updates.
+// handleWebSocket provides live telemetry streaming to dashboard clients.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Warn("websocket upgrade failed", "component", "fog", "error", err)
 		return
 	}
-
 	s.clientMu.Lock()
 	s.clients[conn] = true
 	s.clientMu.Unlock()
@@ -279,13 +222,61 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
-				break
+				return
 			}
 		}
 	}()
 }
 
-// broadcast sends a message to all connected WebSocket clients.
+// handleGatewayReport logs periodic gateway reports.
+func (s *Server) handleGatewayReport(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close report request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var rep struct {
+		GWID      string `json:"gw_id"`
+		Region    string `json:"region"`
+		SlotUsage int    `json:"slotUsage"`
+		AvgDelay  int    `json:"avgDelay"`
+		Collision int    `json:"collision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	slog.Info("gateway report", "gw", rep.GWID, "usage", rep.SlotUsage, "delay", rep.AvgDelay, "coll", rep.Collision)
+	w.WriteHeader(http.StatusOK)
+}
+
+// sweeper cleans expired sessions.
+func (s *Server) sweeper(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := time.Now()
+			s.sessionMu.Lock()
+			for k, v := range s.sessions {
+				if now.Sub(v.CreatedAt) > v.TTL {
+					delete(s.sessions, k)
+					slog.Info("session expired", "vehicle", k)
+				}
+			}
+			s.sessionMu.Unlock()
+		}
+	}
+}
+
+// broadcast sends message to all connected WebSocket clients.
 func (s *Server) broadcast(msg string) {
 	s.clientMu.Lock()
 	defer s.clientMu.Unlock()
