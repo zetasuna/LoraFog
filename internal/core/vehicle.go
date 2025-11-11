@@ -156,18 +156,18 @@ func (v *Vehicle) telemetryLoop(ctx context.Context) {
 func (v *Vehicle) sendTelemetry(d model.ArduinoData) {
 	lat := int32(d.Latitude * 1e7)
 	lon := int32(d.Longitude * 1e7)
-	speed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
-	head := uint16(d.CurrentHead % 360)
+	curHead := uint16(d.CurrentHead % 360)
+	tarHead := uint16(d.CurrentHead % 360)
+	lSpeed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
+	rSpeed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
 
-	payload := model.BuildTelemetryPacked(lat, lon, speed, head)
+	payload := model.BuildTelemetryPacked(lat, lon, curHead, tarHead, lSpeed, rSpeed)
 
-	// nonce := make([]byte, model.NonceLen)
-	// copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLen])
 	v.seqMu.Lock()
 	seq := v.seq
 	v.seq++
 	v.seqMu.Unlock()
-	nonce := make([]byte, model.NonceLen)
+	nonce := make([]byte, model.NonceLength)
 	if _, err := rand.Read(nonce); err != nil { // fallback
 		copy(nonce, []byte(time.Now().Format("15040506")))
 	}
@@ -194,8 +194,8 @@ func (v *Vehicle) sendTelemetry(d model.ArduinoData) {
 func (v *Vehicle) handleBeacon() {
 	msg := map[string]any{"type": "hello", "vehicle_id": v.ID}
 	b, _ := json.Marshal(msg)
-	nonce := make([]byte, model.NonceLen)
-	copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLen])
+	nonce := make([]byte, model.NonceLength)
+	copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLength])
 	frame, _ := model.BuildPlainFrame(model.TypeHello, 0, nonce, b)
 	_ = v.lora.WriteBytes(frame)
 	slog.Info("HELLO sent", "vehicle", v.ID)

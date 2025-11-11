@@ -1,13 +1,4 @@
 // Command lora runs the LoraFog system orchestrator.
-//
-// CHANGELOG (refactor v2):
-// - Unified startup with structured logging and graceful shutdown
-// - Integrated util.SetupLogger()
-// - Uses context cancellation on SIGINT/SIGTERM
-// - Validates YAML configuration before launch
-// - Safe close sequence for System
-// - Clean exit codes and consistent logs
-
 package main
 
 import (
@@ -28,17 +19,34 @@ import (
 
 func main() {
 	// --- Parse CLI flags ---
-	cfgPath := flag.String("c", "configs/config.yml", "Path to YAML configuration file")
+	cfgPath := flag.String(
+		"c",
+		"configs/config.yml",
+		"Path to YAML configuration file",
+	)
 	flag.Parse()
 
 	// --- Setup global logger ---
-	util.SetupLogger()
-	slog.Info("starting LoraFog runtime", "component", "main", "config", *cfgPath)
+	logConfig := util.LogConfig{
+		Level:     slog.LevelDebug, // Log ở mức Debug khi phát triển
+		IsJSON:    false,           // Dùng Text cho dễ đọc
+		AddSource: true,            // Thêm file:line
+	}
+	util.SetupLogger(logConfig)
+	slog.Info(
+		"Logger initialized",
+		"component", "main",
+		"config", *cfgPath,
+	)
 
 	// --- Validate config early ---
-	cfg, err := loadAndValidateConfig(*cfgPath)
+	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
-		slog.Error("invalid configuration", "component", "main", "error", err)
+		slog.Error(
+			"Configuration is invalid",
+			"component", "main",
+			"error", err,
+		)
 		os.Exit(1)
 	}
 	_ = cfg // not used directly (System loads internally)
@@ -46,35 +54,56 @@ func main() {
 	// --- Create system instance ---
 	system, err := core.NewSystem(*cfgPath)
 	if err != nil {
-		slog.Error("failed to initialize system", "component", "main", "error", err)
+		slog.Error(
+			"System failed to initialize",
+			"component", "main",
+			"error", err,
+		)
 		os.Exit(1)
 	}
 
 	// --- Setup signal handling for graceful shutdown ---
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer stop()
 
 	// --- Start all components ---
 	if err := system.Start(ctx); err != nil {
-		slog.Error("system start failed", "component", "main", "error", err)
+		slog.Error(
+			"System failed to start",
+			"component", "main",
+			"error", err,
+		)
 		os.Exit(1)
 	}
 
 	// --- Wait for termination signal ---
-	slog.Info("system running (press Ctrl+C to exit)", "component", "main")
+	slog.Info(
+		"System is running (press Ctrl+C to exit)",
+		"component", "main",
+	)
 	<-ctx.Done()
 
 	// --- Graceful shutdown ---
-	slog.Info("shutting down system...", "component", "main")
+	slog.Info(
+		"System is shutting down ...",
+		"component", "main",
+	)
 	system.Shutdown()
 
 	// Allow time for async cleanup/logs
 	time.Sleep(500 * time.Millisecond)
-	slog.Info("LoraFog terminated successfully", "component", "main")
+	slog.Info(
+		"System terminated successfully",
+		"component", "main",
+	)
 }
 
 // loadAndValidateConfig loads the YAML file and validates it.
-func loadAndValidateConfig(path string) (*model.Config, error) {
+func loadConfig(path string) (*model.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

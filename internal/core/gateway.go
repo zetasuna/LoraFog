@@ -90,7 +90,10 @@ func (g *Gateway) Shutdown() {
 	}
 
 	if g.httpSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
 		defer cancel()
 		if err := g.httpSrv.Shutdown(ctx); err != nil {
 			slog.Warn("gateway HTTP server shutdown error",
@@ -118,9 +121,17 @@ func (g *Gateway) beaconLoop() {
 				"guard": g.guardMs,
 			}
 			b, _ := json.Marshal(beacon)
-			frame, _ := model.BuildPlainFrame(model.TypeBeacon, 0, make([]byte, model.NonceLen), b)
+			frame, _ := model.BuildPlainFrame(
+				model.TypeBeacon,
+				0,
+				make([]byte, model.NonceLength),
+				b,
+			)
 			_ = g.lora.WriteBytes(frame)
-			slog.Debug("beacon sent", "gw", g.ID)
+			slog.Debug(
+				"beacon sent",
+				"gw", g.ID,
+			)
 		}
 	}
 }
@@ -177,7 +188,10 @@ func (g *Gateway) uplinkLoop() {
 			typ, _, _, payload, err := model.ParseFrame(frame, nil)
 			if err != nil {
 				// cannot parse frame even as plain -> drop and continue
-				slog.Warn("unable to parse frame", "gw", g.ID, "err", err)
+				slog.Warn(
+					"unable to parse frame",
+					"gw", g.ID, "err", err,
+				)
 				continue
 			}
 			if typ == model.TypeTelemetry {
@@ -186,7 +200,10 @@ func (g *Gateway) uplinkLoop() {
 				go g.postTelemetry("", payload)
 			} else {
 				// other plain types (hello/beacon/auth) may be ignored here or handled if needed
-				slog.Debug("received non-telemetry plain frame", "gw", g.ID, "type", typ)
+				slog.Debug(
+					"received non-telemetry plain frame",
+					"gw", g.ID, "type", typ,
+				)
 			}
 		}
 	}
@@ -201,16 +218,21 @@ func (g *Gateway) postTelemetry(vid string, data []byte) {
 	}
 
 	telemetry := model.TelemetryData{
-		VehicleID:  vid,
-		Latitude:   float64(t.LatI32) / 1e7,
-		Longitude:  float64(t.LonI32) / 1e7,
-		LeftSpeed:  t.SpeedU16,
-		RightSpeed: t.HeadingU16,
+		VehicleID:   vid,
+		Latitude:    float64(t.LatI32) / 1e7,
+		Longitude:   float64(t.LonI32) / 1e7,
+		CurrentHead: t.CurHeadU16,
+		TargetHead:  t.TarHeadU16,
+		LeftSpeed:   t.LSpeedU16,
+		RightSpeed:  t.RSpeedU16,
 	}
 
 	b, _ := json.Marshal(telemetry)
-	url := "http://" + g.ServerAddr + "/api/telemetry"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	resp, err := http.Post(
+		"http://"+g.ServerAddr+"/api/telemetry",
+		"application/json",
+		bytes.NewReader(b),
+	)
 	if err != nil {
 		slog.Warn("failed to send report",
 			"component", "gateway", "id", g.ID, "error", err)
@@ -242,7 +264,7 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, _ := json.Marshal(ctrl)
-	nonce := make([]byte, model.NonceLen)
+	nonce := make([]byte, model.NonceLength)
 	g.keyMu.Lock()
 	key := g.keys[vid]
 	g.keyMu.Unlock()
@@ -275,7 +297,11 @@ func (g *Gateway) reportLoop() {
 			}
 			payload, _ := json.Marshal(body)
 			go func() {
-				resp, err := http.Post("http://"+g.ServerAddr+"/api/gw/report", "application/json", bytes.NewReader(payload))
+				resp, err := http.Post(
+					"http://"+g.ServerAddr+"/api/gw/report",
+					"application/json",
+					bytes.NewReader(payload),
+				)
 				if err != nil {
 					slog.Warn("failed to send report",
 						"component", "gateway", "id", g.ID, "error", err)

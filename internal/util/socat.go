@@ -1,11 +1,6 @@
 // Package util provides helpers for virtual serial management using socat.
 package util
 
-// CHANGELOG (refactor v2):
-// - Improved process tracking and safe cleanup
-// - Added context-aware start with error handling
-// - Standardized naming and structured logging
-
 import (
 	"context"
 	"fmt"
@@ -19,10 +14,10 @@ import (
 
 // SocatManager manages socat processes used to create virtual serial pairs.
 type SocatManager struct {
-	mu      sync.Mutex
-	cmds    []*exec.Cmd
-	links   []string
-	stopped bool
+	mutex    sync.Mutex
+	commands []*exec.Cmd
+	links    []string
+	stopped  bool
 }
 
 // NewSocatManager constructs an empty SocatManager.
@@ -32,31 +27,42 @@ func NewSocatManager() *SocatManager {
 
 // CreatePair starts a socat process to link two PTYs (left <-> right).
 // It returns an error if socat cannot be started.
-func (m *SocatManager) CreatePair(left, right string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (sm *SocatManager) CreatePair(left, right string) error {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
 
-	if m.stopped {
-		return fmt.Errorf("socat manager is stopped")
+	if sm.stopped {
+		err := fmt.Errorf("Socat manager is stopped")
+		slog.Warn(
+			"create pair failed: manager is stopped",
+			"left", left, "right", right,
+		)
+		return err
 	}
 
-	cmd := exec.CommandContext(context.Background(),
+	command := exec.CommandContext(context.Background(),
 		"socat", "-d", "-d",
 		fmt.Sprintf("pty,raw,echo=0,link=%s", left),
 		fmt.Sprintf("pty,raw,echo=0,link=%s", right),
 	)
 	// Direct logs to program stderr/stdout for visibility.
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		slog.Warn("failed to start socat", "component", "socat", "left", left, "right", right, "error", err)
+	if err := command.Start(); err != nil {
+		slog.Warn(
+			"failed to start socat",
+			"component", "socat", "left", left, "right", right, "error", err,
+		)
 		return fmt.Errorf("start socat: %w", err)
 	}
 
-	slog.Info("socat started", "component", "socat", "pid", cmd.Process.Pid, "left", left, "right", right)
-	m.cmds = append(m.cmds, cmd)
-	m.links = append(m.links, left, right)
+	slog.Info(
+		"socat started",
+		"component", "socat", "pid", command.Process.Pid, "left", left, "right", right,
+	)
+	sm.commands = append(sm.commands, command)
+	sm.links = append(sm.links, left, right)
 
 	// Give socat some time to create the links
 	timeout := time.After(500 * time.Millisecond)
@@ -75,24 +81,24 @@ func (m *SocatManager) CreatePair(left, right string) error {
 }
 
 // Cleanup stops all started socat processes and removes links created.
-func (m *SocatManager) Cleanup() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stopped {
+func (sm *SocatManager) Cleanup() {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	if sm.stopped {
 		return
 	}
-	m.stopped = true
+	sm.stopped = true
 
-	for _, cmd := range m.cmds {
-		if cmd == nil || cmd.Process == nil {
+	for _, command := range sm.commands {
+		if command == nil || command.Process == nil {
 			continue
 		}
-		p := cmd.Process
+		p := command.Process
 		slog.Info("killing socat process", "component", "socat", "pid", p.Pid)
 		_ = p.Signal(syscall.SIGTERM)
 		// wait with timeout
 		done := make(chan error, 1)
-		go func(c *exec.Cmd) { done <- c.Wait() }(cmd)
+		go func(c *exec.Cmd) { done <- c.Wait() }(command)
 		select {
 		case <-time.After(500 * time.Millisecond):
 			_ = p.Kill()
@@ -101,7 +107,7 @@ func (m *SocatManager) Cleanup() {
 	}
 
 	// Remove links if exist
-	for _, path := range m.links {
+	for _, path := range sm.links {
 		if _, err := os.Lstat(path); err == nil {
 			if err := os.Remove(path); err != nil {
 				slog.Warn("failed to remove socat link", "component", "socat", "path", path, "error", err)
@@ -112,13 +118,13 @@ func (m *SocatManager) Cleanup() {
 	}
 
 	// clear slices
-	m.cmds = nil
-	m.links = nil
+	sm.commands = nil
+	sm.links = nil
 	slog.Info("socat cleanup complete", "component", "socat")
 }
 
 // CleanupAll is a failsafe that attempts to kill any running socat globally.
-func (m *SocatManager) CleanupAll() {
+func (sm *SocatManager) CleanupAll() {
 	// Best-effort: use pkill if available.
 	_ = exec.Command("pkill", "-f", "socat").Run()
 	slog.Info("socat global cleanup attempted", "component", "socat")

@@ -16,9 +16,9 @@ import (
 // Frame constants.
 const (
 	PreambleByte byte = 0xAA
-	TagLen            = 8
-	NonceLen          = 8
-	HeaderLen         = 1 + 1 + 1 + 1 + NonceLen
+	TagLength         = 8
+	NonceLength       = 8
+	HeaderLength      = 1 + 1 + 1 + 1 + NonceLength
 )
 
 // PacketType defines LoRa packet categories.
@@ -37,51 +37,57 @@ const (
 type TelemetryPacked struct {
 	LatI32     int32
 	LonI32     int32
-	SpeedU16   uint16
-	HeadingU16 uint16
+	CurHeadU16 uint16
+	TarHeadU16 uint16
+	LSpeedU16  uint16
+	RSpeedU16  uint16
 }
 
 // BuildTelemetryPacked packs telemetry into 12 bytes.
-func BuildTelemetryPacked(lat, lon int32, speed, heading uint16) []byte {
-	b := make([]byte, 12)
-	binary.BigEndian.PutUint32(b[0:4], uint32(lat))
-	binary.BigEndian.PutUint32(b[4:8], uint32(lon))
-	binary.BigEndian.PutUint16(b[8:10], speed)
-	binary.BigEndian.PutUint16(b[10:12], heading)
-	return b
+func BuildTelemetryPacked(lat, lon int32, curHead, tarHead, lSpeed, rSpeed uint16) []byte {
+	frame := make([]byte, 16)
+	binary.BigEndian.PutUint32(frame[0:4], uint32(lat))
+	binary.BigEndian.PutUint32(frame[4:8], uint32(lon))
+	binary.BigEndian.PutUint16(frame[8:10], curHead)
+	binary.BigEndian.PutUint16(frame[10:12], tarHead)
+	binary.BigEndian.PutUint16(frame[12:14], lSpeed)
+	binary.BigEndian.PutUint16(frame[14:16], rSpeed)
+	return frame
 }
 
 // ParseTelemetryPacked unpacks 12-byte telemetry into struct.
-func ParseTelemetryPacked(b []byte) (TelemetryPacked, error) {
-	if len(b) != 12 {
-		return TelemetryPacked{}, fmt.Errorf("invalid telemetry length %d", len(b))
-	}
+func ParseTelemetryPacked(frame []byte) (TelemetryPacked, error) {
+	// if len(frame) != 12 {
+	// 	return TelemetryPacked{}, fmt.Errorf("invalid telemetry length %d", len(frame))
+	// }
 	return TelemetryPacked{
-		LatI32:     int32(binary.BigEndian.Uint32(b[0:4])),
-		LonI32:     int32(binary.BigEndian.Uint32(b[4:8])),
-		SpeedU16:   binary.BigEndian.Uint16(b[8:10]),
-		HeadingU16: binary.BigEndian.Uint16(b[10:12]),
+		LatI32:     int32(binary.BigEndian.Uint32(frame[0:4])),
+		LonI32:     int32(binary.BigEndian.Uint32(frame[4:8])),
+		CurHeadU16: binary.BigEndian.Uint16(frame[8:10]),
+		TarHeadU16: binary.BigEndian.Uint16(frame[10:12]),
+		LSpeedU16:  binary.BigEndian.Uint16(frame[12:14]),
+		RSpeedU16:  binary.BigEndian.Uint16(frame[14:16]),
 	}, nil
 }
 
 // BuildPlainFrame builds a plaintext LoRa frame (no encryption).
-func BuildPlainFrame(typ PacketType, seq byte, nonce []byte, payload []byte) ([]byte, error) {
-	if len(nonce) != NonceLen {
+func BuildPlainFrame(packetType PacketType, sequence byte, nonce []byte, payload []byte) ([]byte, error) {
+	if len(nonce) != NonceLength {
 		return nil, errors.New("invalid nonce length")
 	}
-	totalLen := HeaderLen + len(payload) + TagLen
-	if totalLen > 255 {
+	totalLength := HeaderLength + len(payload) + TagLength
+	if totalLength > 255 {
 		return nil, errors.New("frame too long")
 	}
 
 	buf := &bytes.Buffer{}
 	buf.WriteByte(PreambleByte)
-	buf.WriteByte(byte(totalLen))
-	buf.WriteByte(byte(typ))
-	buf.WriteByte(seq)
+	buf.WriteByte(byte(totalLength))
+	buf.WriteByte(byte(packetType))
+	buf.WriteByte(sequence)
 	buf.Write(nonce)
 	buf.Write(payload)
-	buf.Write(make([]byte, TagLen))
+	buf.Write(make([]byte, TagLength))
 	return buf.Bytes(), nil
 }
 
@@ -90,7 +96,7 @@ func BuildSecureFrame(typ PacketType, seq byte, nonce []byte, payload []byte, ke
 	if len(key) != 16 {
 		return nil, errors.New("key must be 16 bytes")
 	}
-	if len(nonce) != NonceLen {
+	if len(nonce) != NonceLength {
 		return nil, errors.New("invalid nonce length")
 	}
 
@@ -109,9 +115,9 @@ func BuildSecureFrame(typ PacketType, seq byte, nonce []byte, payload []byte, ke
 
 	// Compute CMAC tag
 	macData := append([]byte{byte(typ), seq}, append(nonce, ct...)...)
-	tag := aesCmac(block, macData)[:TagLen]
+	tag := aesCmac(block, macData)[:TagLength]
 
-	totalLen := HeaderLen + len(ct) + len(tag)
+	totalLen := HeaderLength + len(ct) + len(tag)
 	if totalLen > 255 {
 		return nil, errors.New("frame too long")
 	}
@@ -129,7 +135,7 @@ func BuildSecureFrame(typ PacketType, seq byte, nonce []byte, payload []byte, ke
 
 // ParseFrame parses and verifies a LoRa frame.
 func ParseFrame(frame []byte, key []byte) (PacketType, byte, []byte, []byte, error) {
-	if len(frame) < HeaderLen+TagLen {
+	if len(frame) < (HeaderLength + TagLength) {
 		return 0, 0, nil, nil, errors.New("frame too short")
 	}
 	if frame[0] != PreambleByte {
@@ -144,10 +150,10 @@ func ParseFrame(frame []byte, key []byte) (PacketType, byte, []byte, []byte, err
 
 	typ := PacketType(frame[2])
 	seq := frame[3]
-	nonce := frame[4 : 4+NonceLen]
-	data := frame[4+NonceLen:]
-	ct := data[:len(data)-TagLen]
-	tag := data[len(data)-TagLen:]
+	nonce := frame[4 : 4+NonceLength]
+	data := frame[4+NonceLength:]
+	ct := data[:len(data)-TagLength]
+	tag := data[len(data)-TagLength:]
 
 	// no key = plain mode
 	if key == nil {
@@ -160,7 +166,7 @@ func ParseFrame(frame []byte, key []byte) (PacketType, byte, []byte, []byte, err
 	}
 
 	macData := append([]byte{byte(typ), seq}, append(nonce, ct...)...)
-	expected := aesCmac(block, macData)[:TagLen]
+	expected := aesCmac(block, macData)[:TagLength]
 	if !bytes.Equal(tag, expected) {
 		return 0, 0, nil, nil, errors.New("cmac mismatch")
 	}
