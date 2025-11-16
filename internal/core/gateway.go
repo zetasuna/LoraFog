@@ -19,7 +19,6 @@ import (
 
 // Gateway manages LoRa radio, TDMA timing, and reports to Fog.
 type Gateway struct {
-	ID         string
 	Addr       string
 	ServerAddr string
 	lora       *device.Lora
@@ -38,9 +37,8 @@ type Gateway struct {
 }
 
 // NewGateway creates a gateway instance.
-func NewGateway(id, dev string, baud int, addr, srv string) *Gateway {
+func NewGateway(dev string, baud int, addr, srv string) *Gateway {
 	return &Gateway{
-		ID:         id,
 		Addr:       addr,
 		ServerAddr: srv,
 		lora:       device.NewLora(dev, baud),
@@ -59,8 +57,8 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go g.beaconLoop()
 	g.wg.Add(1)
 	go g.uplinkLoop()
-	g.wg.Add(1)
-	go g.reportLoop()
+	// g.wg.Add(1)
+	// go g.reportLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/command", g.handleControl)
@@ -85,7 +83,7 @@ func (g *Gateway) Shutdown() {
 	if g.lora != nil {
 		if err := g.lora.Close(); err != nil {
 			slog.Warn("failed to close device",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "addr", g.Addr, "error", err)
 		}
 	}
 
@@ -97,12 +95,12 @@ func (g *Gateway) Shutdown() {
 		defer cancel()
 		if err := g.httpSrv.Shutdown(ctx); err != nil {
 			slog.Warn("gateway HTTP server shutdown error",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "addr", g.Addr, "error", err)
 		}
 	}
 
 	g.wg.Wait()
-	slog.Info("gateway stopped", "id", g.ID)
+	slog.Info("gateway stopped", "addr", g.Addr)
 }
 
 // beaconLoop periodically sends TDMA sync beacons.
@@ -116,7 +114,7 @@ func (g *Gateway) beaconLoop() {
 			return
 		case <-t.C:
 			beacon := map[string]any{
-				"type": "beacon", "gw": g.ID,
+				"type": "beacon", "gw": g.Addr,
 				"slot":  g.slotDur.Milliseconds(),
 				"guard": g.guardMs,
 			}
@@ -130,7 +128,7 @@ func (g *Gateway) beaconLoop() {
 			_ = g.lora.WriteBytes(frame)
 			slog.Debug(
 				"beacon sent",
-				"gw", g.ID,
+				"gw", g.Addr,
 			)
 		}
 	}
@@ -190,7 +188,7 @@ func (g *Gateway) uplinkLoop() {
 				// cannot parse frame even as plain -> drop and continue
 				slog.Warn(
 					"unable to parse frame",
-					"gw", g.ID, "err", err,
+					"gw", g.Addr, "err", err,
 				)
 				continue
 			}
@@ -202,7 +200,7 @@ func (g *Gateway) uplinkLoop() {
 				// other plain types (hello/beacon/auth) may be ignored here or handled if needed
 				slog.Debug(
 					"received non-telemetry plain frame",
-					"gw", g.ID, "type", typ,
+					"gw", g.Addr, "type", typ,
 				)
 			}
 		}
@@ -213,7 +211,7 @@ func (g *Gateway) uplinkLoop() {
 func (g *Gateway) postTelemetry(vid string, data []byte) {
 	t, err := model.ParseTelemetryPacked(data)
 	if err != nil {
-		slog.Warn("failed to decode telemetry", "gw", g.ID, "err", err)
+		slog.Warn("failed to decode telemetry", "gw", g.Addr, "err", err)
 		return
 	}
 
@@ -234,13 +232,53 @@ func (g *Gateway) postTelemetry(vid string, data []byte) {
 		bytes.NewReader(b),
 	)
 	if err != nil {
-		slog.Warn("failed to send report",
-			"component", "gateway", "id", g.ID, "error", err)
+		slog.Warn("failed to send telemetry",
+			"component", "gateway", "id", g.Addr, "error", err)
 		return
 	}
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+}
+
+// postRegisterToServer calls Fog /api/register and processes response.
+// If server returns a key_hex, register the key for this vehicle locally.
+func (g *Gateway) postRegisterToServer(vehicleHWID string) {
+	reqBody := map[string]any{
+		"gateway_id": g.Addr,
+		"vehicle_id": vehicleHWID,
+	}
+	b, _ := json.Marshal(reqBody)
+	resp, err := http.Post("http://"+g.ServerAddr+"/api/register", "application/json", bytes.NewReader(b))
+	if err != nil {
+		slog.Warn("register request to server failed", "gw", g.Addr, "vehicle", vehicleHWID, "err", err)
+		return
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+
+	// read response
+	var r map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		slog.Warn("invalid register response", "gw", g.Addr, "vehicle", vehicleHWID, "err", err)
+		return
+	}
+
+	// Optional key provision
+	if kh, ok := r["key_hex"].(string); ok && kh != "" {
+		if err := g.RegisterKey(vehicleHWID, kh); err != nil {
+			slog.Warn("failed to register key", "gw", g.Addr, "vehicle", vehicleHWID, "err", err)
+		} else {
+			slog.Info("registered key for vehicle", "gw", g.Addr, "vehicle", vehicleHWID)
+		}
+	}
+
+	// optional: store mapping to forward quickly (vehicle->gatewayURL)
+	gURL := "http://" + g.Addr // gateway listens on g.Addr
+	// In production you probably want to inform Fog about this mapping or use server DB.
+	// store locally? (not necessary)
+	_ = gURL
 }
 
 // handleControl handles HTTP control from Fog -> Vehicle.
@@ -249,7 +287,7 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
 				slog.Warn("failed to close control request body",
-					"component", "gateway", "id", g.ID, "error", err)
+					"component", "gateway", "id", g.Addr, "error", err)
 			}
 		}
 	}()
@@ -293,7 +331,10 @@ func (g *Gateway) reportLoop() {
 			return
 		case <-t.C:
 			body := map[string]any{
-				"gw_id": g.ID, "slotUsage": g.slotCount, "avgDelay": 80, "collision": 0,
+				"gw_id":     g.Addr,
+				"slotUsage": g.slotCount,
+				"avgDelay":  80,
+				"collision": 0,
 			}
 			payload, _ := json.Marshal(body)
 			go func() {
@@ -303,8 +344,12 @@ func (g *Gateway) reportLoop() {
 					bytes.NewReader(payload),
 				)
 				if err != nil {
-					slog.Warn("failed to send report",
-						"component", "gateway", "id", g.ID, "error", err)
+					slog.Warn(
+						"failed to send report",
+						"component", "gateway",
+						"addr", g.Addr,
+						"error", err,
+					)
 					return
 				}
 				if resp != nil && resp.Body != nil {
@@ -312,6 +357,17 @@ func (g *Gateway) reportLoop() {
 				}
 			}()
 
+			// Simple auto-scaling: decrease slotCount if collisions high, increase if low usage
+			// NOTE: demo heuristic — tune for your environment.
+			if g.slotCount > 4 && body["collision"].(int) > 5 {
+				g.slotCount -= 2
+				slog.Info("autoscale: reduce slotCount due high collision", "gw", g.Addr, "slotCount", g.slotCount)
+			} else if g.slotCount < 32 && body["slotUsage"].(int) < g.slotCount/2 {
+				g.slotCount += 1
+				slog.Info("autoscale: increase slotCount due low usage", "gw", g.Addr, "slotCount", g.slotCount)
+			}
+			// adjust slot duration proportionally (demo)
+			g.slotDur = time.Duration(800+(g.slotCount/4)*100) * time.Millisecond
 			// simple tuning logic
 			if g.guardMs < 1000 {
 				g.guardMs += 20

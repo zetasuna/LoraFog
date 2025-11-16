@@ -26,14 +26,14 @@ type Arduino struct {
 }
 
 // NewArduino creates and connects to an Arduino serial device.
-func NewArduino(dev string, baud int) *Arduino {
-	s, err := NewSerial(dev, baud)
+func NewArduino(device string, baud int) *Arduino {
+	s, err := NewSerial(device, baud)
 	if err != nil {
 		slog.Warn("failed to connect Arduino",
-			"component", "arduino", "device", dev, "error", err)
+			"component", "arduino", "device", device, "error", err)
 	}
 	return &Arduino{
-		Device: dev,
+		Device: device,
 		Baud:   baud,
 		serial: s,
 	}

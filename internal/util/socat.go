@@ -32,7 +32,7 @@ func (sm *SocatManager) CreatePair(left, right string) error {
 	defer sm.mutex.Unlock()
 
 	if sm.stopped {
-		err := fmt.Errorf("Socat manager is stopped")
+		err := fmt.Errorf("socat manager is stopped")
 		slog.Warn(
 			"create pair failed: manager is stopped",
 			"left", left, "right", right,

@@ -3,6 +3,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -48,18 +49,49 @@ func NewSystem(path string) (*System, error) {
 	}
 
 	for _, vs := range cfg.VirtualSerials {
-		_ = sys.socatManager.CreatePair(vs.Left, vs.Right)
+		_ = sys.socatManager.CreatePair(
+			vs.Left,
+			vs.Right,
+		)
 	}
 	time.Sleep(300 * time.Millisecond)
 
+	// 1. Mở kết nối DB ở đây (trong main)
+	db, err := sql.Open("mysql", "admin:admin@tcp(localhost:3006)/boat")
+	if err != nil {
+		slog.Error("failed to configure database", "error", err)
+		// os.Exit(1)
+	}
+
+	// 2. Ping DB để xác nhận kết nối
+	if err := db.Ping(); err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		// os.Exit(1)
+	}
+	slog.Info("Database connection established")
 	if cfg.Server.Addr != "" {
-		sys.server = NewServer(cfg.Server.Addr, cfg.Server.AppAddr)
+		sys.server = NewServer(
+			cfg.Server.Addr,
+			cfg.Server.AppAddr,
+			db,
+		)
 	}
 	for _, g := range cfg.Gateways {
-		sys.gateways = append(sys.gateways, NewGateway(g.ID, g.LoraDev, g.LoraBaud, g.Addr, g.ServerAddr))
+		sys.gateways = append(sys.gateways, NewGateway(
+			g.LoraDev,
+			g.LoraBaud,
+			g.Addr,
+			g.ServerAddr,
+		))
 	}
 	for _, v := range cfg.Vehicles {
-		sys.vehicles = append(sys.vehicles, NewVehicle(v.ID, v.LoraDev, v.LoraBaud, v.ArduinoDev, v.ArduinoBaud))
+		sys.vehicles = append(sys.vehicles, NewVehicle(
+			v.ID,
+			v.LoraDev,
+			v.LoraBaud,
+			v.ArduinoDev,
+			v.ArduinoBaud,
+		))
 	}
 	for _, a := range cfg.Arduinos {
 		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Dev, a.Baud))

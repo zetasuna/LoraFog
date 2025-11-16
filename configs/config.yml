@@ -1,25 +1,16 @@
-# LoraFog Configuration v2 (CBOR/JSON refactor)
-# Compatible with Go 1.24 and refactored system architecture
-
 server:
   address: "127.0.0.1:10000"
   app_address: "127.0.0.1:3001"
-
   gateway_registry:
-    - id: "GW01"
-      address: "127.0.0.1:10001"
-    - id: "GW02"
-      address: "127.0.0.1:10002"
+    - address: "127.0.0.1:10001"
+    - address: "127.0.0.1:10002"
 
 gateways:
-  - id: "GW01"
-    address: "127.0.0.1:10001"
+  - address: "127.0.0.1:10001"
     server_address: "127.0.0.1:10000"
     lora_device: "/tmp/ttyGW1"
     lora_baud: 9600
-
-  - id: "GW02"
-    address: "127.0.0.1:10002"
+  - address: "127.0.0.1:10002"
     server_address: "127.0.0.1:10000"
     lora_device: "/tmp/ttyGW2"
     lora_baud: 9600
@@ -30,7 +21,6 @@ vehicles:
     lora_baud: 9600
     arduino_device: "/tmp/ttyADR1"
     arduino_baud: 9600
-
   - id: "VH02"
     lora_device: "/tmp/ttyVH2"
     lora_baud: 9600

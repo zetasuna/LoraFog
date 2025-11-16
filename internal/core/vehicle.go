@@ -4,6 +4,7 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 // Vehicle represents one LoRa boat node.
 type Vehicle struct {
 	ID         string
+	HWID       string
 	lora       *device.Lora
 	arduino    *device.Arduino
 	sessionKey []byte
@@ -28,13 +30,24 @@ type Vehicle struct {
 }
 
 // NewVehicle creates a new Vehicle instance.
-func NewVehicle(id, dev string, baud int, arDev string, arBaud int) *Vehicle {
+func NewVehicle(
+	id string,
+	loraDevice string, loraBaud int,
+	arduinoDevice string, arduinoBaud int,
+) *Vehicle {
+	// id, err := util.GenerateUUIDv4()
+	// if err != nil {
+	// 	slog.Warn(
+	// 		"Failed to Generate UUID for vehicle",
+	// 		"err", err,
+	// 	)
+	// }
 	v := &Vehicle{
 		ID:   id,
-		lora: device.NewLora(dev, baud),
+		lora: device.NewLora(loraDevice, loraBaud),
 	}
-	if arDev != "" {
-		v.arduino = device.NewArduino(arDev, arBaud)
+	if arduinoDevice != "" {
+		v.arduino = device.NewArduino(arduinoDevice, arduinoBaud)
 	}
 	return v
 }
@@ -85,36 +98,43 @@ func (v *Vehicle) listenLoop(ctx context.Context) {
 			continue
 		}
 
-		// Try parse with current session key (if any). ParseFrame returns plaintext payload if key ok,
+		// Try parse with current session key (if any).
+		// ParseFrame returns plaintext payload if key ok,
 		// otherwise error. For plain frames, pass nil key.
 		// Process each complete frame extracted by ReadFrames()
 		for _, frame := range frames {
 			var (
-				typ     model.PacketType
-				payload []byte
+				packetType model.PacketType
+				payload    []byte
 			)
 
 			// If we have a session key, try decrypt/verify first.
 			if v.sessionKey != nil {
-				typ, _, _, payload, err = model.ParseFrame(frame, v.sessionKey)
+				packetType, _, _, payload, err = model.ParseFrame(frame, v.sessionKey)
 				if err != nil {
 					// try plain fallback (no key)
-					typ, _, _, payload, err = model.ParseFrame(frame, nil)
+					packetType, _, _, payload, err = model.ParseFrame(frame, nil)
 					if err != nil {
 						// unable to parse even as plain — skip this frame
-						slog.Warn("failed to parse frame (secure and plain)", "vehicle", v.ID, "err", err)
+						slog.Warn(
+							"failed to parse frame (secure and plain)",
+							"vehicle", v.ID, "err", err,
+						)
 						continue
 					}
 				}
 			} else {
 				// no key -> parse as plain
-				typ, _, _, payload, err = model.ParseFrame(frame, nil)
+				packetType, _, _, payload, err = model.ParseFrame(frame, nil)
 				if err != nil {
-					slog.Warn("failed to parse plain frame", "vehicle", v.ID, "err", err)
+					slog.Warn(
+						"failed to parse plain frame",
+						"vehicle", v.ID, "err", err,
+					)
 					continue
 				}
 			}
-			switch typ {
+			switch packetType {
 			case model.TypeBeacon:
 				v.handleBeacon()
 			case model.TypeAuth:
@@ -123,7 +143,10 @@ func (v *Vehicle) listenLoop(ctx context.Context) {
 				v.handleControl(payload)
 			default:
 				// ignore other types
-				slog.Debug("ignoring unknown packet type", "vehicle", v.ID, "type", typ)
+				slog.Debug(
+					"ignoring unknown packet type",
+					"vehicle", v.ID, "type", packetType,
+				)
 			}
 		}
 	}
@@ -134,7 +157,10 @@ func (v *Vehicle) telemetryLoop(ctx context.Context) {
 	ch := make(chan model.ArduinoData, 4)
 	stop, err := v.arduino.Read(ch)
 	if err != nil {
-		slog.Warn("arduino read failed", "vehicle", v.ID, "err", err)
+		slog.Warn(
+			"arduino read failed",
+			"vehicle", v.ID, "err", err,
+		)
 		return
 	}
 	defer stop()
@@ -154,30 +180,52 @@ func (v *Vehicle) telemetryLoop(ctx context.Context) {
 
 // sendTelemetry packs and transmits telemetry data.
 func (v *Vehicle) sendTelemetry(d model.ArduinoData) {
-	lat := int32(d.Latitude * 1e7)
-	lon := int32(d.Longitude * 1e7)
-	curHead := uint16(d.CurrentHead % 360)
-	tarHead := uint16(d.CurrentHead % 360)
-	lSpeed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
-	rSpeed := uint16(d.LeftSpeed / 10) // conversion example; adjust per your mapping
+	latitude := int32(d.Latitude * 1e7)
+	longitude := int32(d.Longitude * 1e7)
+	currentHead := uint16(d.CurrentHead % 360)
+	targetHead := uint16(d.TargetHead % 360)
+	leftSpeed := uint16(d.LeftSpeed)
+	rightSpeed := uint16(d.RightSpeed)
 
-	payload := model.BuildTelemetryPacked(lat, lon, curHead, tarHead, lSpeed, rSpeed)
+	payload := model.BuildTelemetryPacked(
+		latitude,
+		longitude,
+		currentHead,
+		targetHead,
+		leftSpeed,
+		rightSpeed,
+	)
 
 	v.seqMu.Lock()
 	seq := v.seq
 	v.seq++
 	v.seqMu.Unlock()
 	nonce := make([]byte, model.NonceLength)
-	if _, err := rand.Read(nonce); err != nil { // fallback
-		copy(nonce, []byte(time.Now().Format("15040506")))
+	binary.BigEndian.PutUint32(nonce[0:4], uint32(seq))
+
+	// phần còn lại random
+	if _, err := rand.Read(nonce[4:]); err != nil {
+		// fallback: dùng timestamp cho phần random
+		binary.BigEndian.PutUint64(nonce[4:], uint64(time.Now().UnixNano()))
 	}
 
 	var frame []byte
 	var err error
 	if v.sessionKey != nil {
-		frame, err = model.BuildSecureFrame(model.TypeTelemetry, seq, nonce, payload, v.sessionKey)
+		frame, err = model.BuildSecureFrame(
+			model.TypeTelemetry,
+			seq,
+			nonce,
+			payload,
+			v.sessionKey,
+		)
 	} else {
-		frame, err = model.BuildPlainFrame(model.TypeTelemetry, seq, nonce, payload)
+		frame, err = model.BuildPlainFrame(
+			model.TypeTelemetry,
+			seq,
+			nonce,
+			payload,
+		)
 	}
 	if err != nil {
 		slog.Warn("build telemetry frame failed", "vehicle", v.ID, "err", err)
@@ -187,12 +235,36 @@ func (v *Vehicle) sendTelemetry(d model.ArduinoData) {
 		slog.Warn("failed to write telemetry frame", "vehicle", v.ID, "err", err)
 		return
 	}
-	slog.Debug("telemetry sent", "vehicle", v.ID, "seq", seq, "nonce", fmt.Sprintf("%X", nonce[:4]), "len", len(frame))
+	slog.Debug(
+		"telemetry sent",
+		"vehicle", v.ID,
+		"seq", seq,
+		"nonce", fmt.Sprintf("%X", nonce[:4]),
+		"len", len(frame),
+	)
+}
+
+// handleControl forwards downlink control to Arduino or logs it.
+func (v *Vehicle) handleControl(p []byte) {
+	// Control payload may be JSON or raw bytes; try JSON decode for helpful log.
+	var ctrl map[string]any
+	if err := json.Unmarshal(p, &ctrl); err == nil {
+		slog.Info("control received", "vehicle", v.ID, "cmd", ctrl)
+	} else {
+		slog.Info("control received (raw)", "vehicle", v.ID)
+	}
+	if v.arduino != nil {
+		// forward raw bytes as string (Arduino expects line-based). Adapt as necessary.
+		_ = v.arduino.Write(string(p))
+	}
 }
 
 // handleBeacon sends a HELLO frame to gateway when a beacon is seen.
 func (v *Vehicle) handleBeacon() {
-	msg := map[string]any{"type": "hello", "vehicle_id": v.ID}
+	msg := map[string]any{
+		"type":       "hello",
+		"vehicle_id": v.ID,
+	}
 	b, _ := json.Marshal(msg)
 	nonce := make([]byte, model.NonceLength)
 	copy(nonce, []byte(time.Now().Format("15040506"))[:model.NonceLength])
@@ -219,21 +291,6 @@ func (v *Vehicle) handleAuth(p []byte) {
 	}
 	if ttlf, ok := am["ttl"].(float64); ok {
 		_ = ttlf // we could store expiry if needed
-	}
-}
-
-// handleControl forwards downlink control to Arduino or logs it.
-func (v *Vehicle) handleControl(p []byte) {
-	// Control payload may be JSON or raw bytes; try JSON decode for helpful log.
-	var ctrl map[string]any
-	if err := json.Unmarshal(p, &ctrl); err == nil {
-		slog.Info("control received", "vehicle", v.ID, "cmd", ctrl)
-	} else {
-		slog.Info("control received (raw)", "vehicle", v.ID)
-	}
-	if v.arduino != nil {
-		// forward raw bytes as string (Arduino expects line-based). Adapt as necessary.
-		_ = v.arduino.Write(string(p))
 	}
 }
 

@@ -10,20 +10,20 @@ import (
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
 type Lora struct {
-	Path   string
+	Device string
 	Baud   int
 	serial *Serial
 }
 
 // NewLora creates a new Lora.
-func NewLora(path string, baud int) *Lora {
-	s, err := NewSerial(path, baud)
+func NewLora(device string, baud int) *Lora {
+	s, err := NewSerial(device, baud)
 	if err != nil {
 		slog.Warn("failed to connect Lora device",
-			"component", "lora", "device", path, "error", err)
+			"component", "lora", "device", device, "error", err)
 	}
 	return &Lora{
-		Path:   path,
+		Device: device,
 		Baud:   baud,
 		serial: s,
 	}

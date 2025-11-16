@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// Mở cổng serial (sửa đường dẫn tùy hệ thống)
-	port, err := serial.Open("/dev/lora2", &serial.Mode{
+	port, err := serial.Open("/dev/lora1", &serial.Mode{
 		BaudRate: 9600,
 	})
 	if err != nil {
@@ -32,7 +32,7 @@ func main() {
 
 	// Gửi dữ liệu định kỳ
 	for i := 0; ; i++ {
-		msg := fmt.Sprintf("Xin chao tu xe B lan %d\n", i)
+		msg := fmt.Sprintf("Xin chao tu xe A lan %d\n", i)
 		_, err := port.Write([]byte(msg))
 		if err != nil {
 			log.Println("Lỗi gửi:", err)

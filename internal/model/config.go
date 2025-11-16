@@ -25,7 +25,6 @@ type GatewayRegistry struct {
 
 // GatewayConfig describes one gateway instance.
 type GatewayConfig struct {
-	ID         string `yaml:"id" json:"id"`
 	Addr       string `yaml:"address" json:"address"`
 	ServerAddr string `yaml:"server_address" json:"server_address"`
 	LoraDev    string `yaml:"lora_device" json:"lora_device"`

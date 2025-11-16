@@ -44,22 +44,23 @@ type TelemetryPacked struct {
 }
 
 // BuildTelemetryPacked packs telemetry into 12 bytes.
-func BuildTelemetryPacked(lat, lon int32, curHead, tarHead, lSpeed, rSpeed uint16) []byte {
+func BuildTelemetryPacked(
+	latitude int32, longitude int32,
+	currentHead, targetHead,
+	leftSpeed, rightSpeed uint16,
+) []byte {
 	frame := make([]byte, 16)
-	binary.BigEndian.PutUint32(frame[0:4], uint32(lat))
-	binary.BigEndian.PutUint32(frame[4:8], uint32(lon))
-	binary.BigEndian.PutUint16(frame[8:10], curHead)
-	binary.BigEndian.PutUint16(frame[10:12], tarHead)
-	binary.BigEndian.PutUint16(frame[12:14], lSpeed)
-	binary.BigEndian.PutUint16(frame[14:16], rSpeed)
+	binary.BigEndian.PutUint32(frame[0:4], uint32(latitude))
+	binary.BigEndian.PutUint32(frame[4:8], uint32(longitude))
+	binary.BigEndian.PutUint16(frame[8:10], currentHead)
+	binary.BigEndian.PutUint16(frame[10:12], targetHead)
+	binary.BigEndian.PutUint16(frame[12:14], leftSpeed)
+	binary.BigEndian.PutUint16(frame[14:16], rightSpeed)
 	return frame
 }
 
 // ParseTelemetryPacked unpacks 12-byte telemetry into struct.
 func ParseTelemetryPacked(frame []byte) (TelemetryPacked, error) {
-	// if len(frame) != 12 {
-	// 	return TelemetryPacked{}, fmt.Errorf("invalid telemetry length %d", len(frame))
-	// }
 	return TelemetryPacked{
 		LatI32:     int32(binary.BigEndian.Uint32(frame[0:4])),
 		LonI32:     int32(binary.BigEndian.Uint32(frame[4:8])),
