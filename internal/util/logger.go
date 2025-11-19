@@ -1,10 +1,6 @@
 // Package util provides small utilities used by the system.
 package util
 
-// CHANGELOG (refactor v2):
-// - Centralized slog setup for structured logging
-// - Exported SetupLogger for callers to initialize global log behavior
-
 import (
 	"log/slog"
 	"os"
@@ -15,7 +11,7 @@ import (
 func SetupLogger() {
 	// Use default handler (console) but include time and source.
 	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource: true,
+		AddSource: false,
 	})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)

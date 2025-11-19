@@ -67,7 +67,7 @@ func main() {
 
 	// --- Graceful shutdown ---
 	slog.Info("shutting down system...", "component", "main")
-	system.Shutdown()
+	system.Stop()
 
 	// Allow time for async cleanup/logs
 	time.Sleep(500 * time.Millisecond)

@@ -1,13 +1,7 @@
-// Package device implements ArduinoDevice for reading and writing telemetry
-// over serial, as well as simulation support.
+// Package device implements ArduinoDevice for
+// reading and writing telemetry over serial
+// as well as simulation support.
 package device
-
-// CHANGELOG (refactor v2):
-// - Context-based lifecycle and safe shutdown
-// - Replaced stop channel with function-returned closure
-// - Structured logging (slog)
-// - Safe Close() with nil checks
-// - Added telemetry simulation helper
 
 import (
 	"fmt"
@@ -105,10 +99,10 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 			data := model.ArduinoData{
 				Latitude:    21.027 + rand.Float64()*0.001,
 				Longitude:   105.835 + rand.Float64()*0.001,
-				CurrentHead: rand.Intn(361),
-				TargetHead:  rand.Intn(361),
-				LeftSpeed:   1000 + rand.Intn(1000),
-				RightSpeed:  1000 + rand.Intn(1000),
+				CurrentHead: rand.Int63n(361),
+				TargetHead:  rand.Int63n(361),
+				LeftSpeed:   1000 + rand.Int63n(1000),
+				RightSpeed:  1000 + rand.Int63n(1000),
 			}
 			line := fmt.Sprintf("%f,%f,%d,%d,%d,%d",
 				data.Latitude, data.Longitude, data.CurrentHead,

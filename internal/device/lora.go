@@ -8,15 +8,15 @@ package device
 // - Safe close and structured logging (slog)
 
 import (
-	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
-
-	"github.com/fxamacker/cbor/v2"
 )
+
+// ErrLoraTimeout được dùng khi không nhận được frame trong thời gian quy định
+var ErrLoraTimeout = errors.New("lora read timeout")
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
 type Lora struct {
@@ -27,7 +27,7 @@ type Lora struct {
 
 // NewLora creates a new Lora.
 func NewLora(path string, baud int) *Lora {
-	s, err := NewSerial(path, baud)
+	serial, err := NewSerial(path, baud)
 	if err != nil {
 		slog.Warn("failed to connect Lora device",
 			"component", "lora", "device", path, "error", err)
@@ -35,70 +35,54 @@ func NewLora(path string, baud int) *Lora {
 	return &Lora{
 		Path:   path,
 		Baud:   baud,
-		serial: s,
+		serial: serial,
 	}
 }
 
-// ReadFrame reads a binary frame from the LoRa serial interface.
-// It expects a 2-byte length prefix followed by that many bytes of CBOR data.
-func (l *Lora) ReadFrame() ([]byte, error) {
+// Read tries to read a CBOR frame with timeout.
+// Timeout=0 means blocking indefinitely.
+// (Logic goroutine/select đã được loại bỏ)
+func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 	if l.serial == nil {
 		return nil, fmt.Errorf("lora serial not initialized")
 	}
 
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(l.serial.reader, header); err != nil {
-		return nil, fmt.Errorf("failed to read frame header: %w", err)
+	// 1. Đọc 2 bytes header (độ dài), sử dụng timeout
+	// (Chú ý: Đã thay thế io.ReadFull trên reader bằng l.serial.ReadBytes)
+	header, err := l.serial.ReadBytes(2, timeout)
+	if err != nil {
+		return nil, err
 	}
 
 	length := binary.BigEndian.Uint16(header)
-	if length == 0 {
-		return nil, fmt.Errorf("invalid frame length 0")
+	if length == 0 || length > 512 { // Thêm check giới hạn kích thước
+		return nil, fmt.Errorf("invalid frame length %d", length)
 	}
 
-	payload, err := l.serial.ReadBytes(int(length))
+	// 2. Đọc payload. Sử dụng timeout=0 (blocking) vì đã đọc được header,
+	// ta muốn đợi đủ payload.
+	payload, err := l.serial.ReadBytes(int(length), 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read frame payload: %w", err)
 	}
 	return payload, nil
 }
 
-// ReadFrameWithTimeout tries to read a CBOR frame with timeout.
-func (l *Lora) ReadFrameWithTimeout(timeout time.Duration) ([]byte, error) {
-	if l.serial == nil {
-		return nil, fmt.Errorf("lora serial not initialized")
-	}
-
-	done := make(chan struct{})
-	var result []byte
-	var err error
-
-	go func() {
-		result, err = l.ReadFrame()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return result, err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("read frame timeout after %s", timeout)
-	}
-}
-
-// WriteFrame sends a binary CBOR frame with a 2-byte big-endian length prefix.
-func (l *Lora) WriteFrame(payload []byte) error {
+func (l *Lora) Write(b []byte) error {
 	if l.serial == nil {
 		return fmt.Errorf("lora serial not initialized")
 	}
-	length := uint16(len(payload))
-	frame := make([]byte, 2+len(payload))
-	binary.BigEndian.PutUint16(frame[0:2], length)
-	copy(frame[2:], payload)
-	return l.serial.WriteBytes(frame)
-}
+	// prefix with 2-byte big endian length
+	if len(b) == 0 || len(b) > 0xFFFF {
+		return fmt.Errorf("invalid payload size %d", len(b))
+	}
+	header := make([]byte, 2)
+	binary.BigEndian.PutUint16(header, uint16(len(b)))
 
-func (l *Lora) WriteBytes(b []byte) error {
+	// write header then payload
+	if err := l.serial.WriteBytes(header); err != nil {
+		return err
+	}
 	return l.serial.WriteBytes(b)
 }
 
@@ -108,39 +92,4 @@ func (l *Lora) Close() error {
 		return nil
 	}
 	return l.serial.Close()
-}
-
-// BroadcastBeacon periodically writes a BeaconMessage as a CBOR frame.
-// ctx controls lifecycle; interval defines broadcast frequency.
-func (l *Lora) BroadcastBeacon(ctx context.Context, interval time.Duration, beacon any) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("stopping beacon broadcast", "component", "lora", "device", l.Path)
-			return
-		case <-ticker.C:
-			b, err := cbor.Marshal(beacon)
-			if err != nil {
-				slog.Warn("encode beacon failed", "component", "lora", "device", l.Path, "error", err)
-				continue
-			}
-			if err := l.WriteFrame(b); err != nil {
-				slog.Warn("write beacon frame failed", "component", "lora", "device", l.Path, "error", err)
-				continue
-			}
-			slog.Debug("beacon broadcasted", "component", "lora", "device", l.Path)
-		}
-	}
-}
-
-// SendAuthRelay sends an AuthMessage CBOR frame (used by Gateway to relay server auth to vehicle).
-func (l *Lora) SendAuthRelay(auth any) error {
-	b, err := cbor.Marshal(auth)
-	if err != nil {
-		return err
-	}
-	return l.WriteFrame(b)
 }

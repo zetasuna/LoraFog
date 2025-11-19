@@ -4,483 +4,367 @@ package core
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
+	"LoraFog/internal/database"
 	"LoraFog/internal/model"
-
-	"github.com/gorilla/websocket"
 )
 
-// Server is the lightweight Fog backend managing registry and telemetry.
-type Server struct {
-	Addr    string
-	AppAddr string
-
-	server   *http.Server
-	database *sql.DB
-
-	// vehicleRegistry sync.Map // vehicleID -> gatewayURL
-
-	clients   map[*websocket.Conn]bool
-	clientMu  sync.Mutex
-	sessionMu sync.Mutex
-	sessions  map[string]*Session
-}
-
-// Session stores temporary authentication for a vehicle.
+// Session đại diện cho một kết nối Vehicle đang hoạt động
 type Session struct {
-	VehicleID string
-	GatewayID string
-	CreatedAt time.Time
-	TTL       time.Duration
-	Slot      int
+	VehicleID      string
+	GatewayAddress string
+	CreatedAt      time.Time
+	TTL            time.Duration // Thời gian sống tối đa không nhận Telemetry
+	Slot           int           // Slot TDMA được cấp phát
 }
 
-// NewServer creates a new Fog HTTP server.
-func NewServer(addr, appAddr string, db *sql.DB) *Server {
+// Server là lõi quản lý của hệ thống Fog
+type Server struct {
+	Address    string
+	AppAddress string
+	database   *database.ServerDB // Giả lập Database
+	httpClient *http.Client
+	// httpServer *http.Server
+
+	mutex        sync.Mutex
+	sessions     map[string]*Session     // Map: VehicleID -> Session
+	gatewaySlots map[string]map[int]bool // Map: GwID -> (SlotIndex -> Used)
+	// Map này giúp Server quản lý và cấp phát slot cho từng Gateway
+}
+
+// NewServer tạo một Server mới
+func NewServer(
+	address string,
+	appAddress string,
+	serverDB *database.ServerDB,
+) *Server {
 	return &Server{
-		Addr:     addr,
-		AppAddr:  appAddr,
-		database: db,
-		clients:  make(map[*websocket.Conn]bool),
-		sessions: make(map[string]*Session),
+		Address:      address,
+		AppAddress:   appAddress,
+		database:     serverDB,
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		sessions:     make(map[string]*Session),
+		gatewaySlots: make(map[string]map[int]bool),
 	}
 }
 
-// Start runs the HTTP server and session sweeper.
+// Start khởi động Server và các tiến trình
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
-	mux.HandleFunc("/api/register", s.handleRegister)
-	mux.HandleFunc("/api/control", s.handleControl)
-	mux.HandleFunc("/api/gw/report", s.handleGatewayReport)
-	mux.HandleFunc("/ws", s.handleWebSocket)
-
-	addr := strings.TrimPrefix(strings.TrimPrefix(s.Addr, "http://"), "https://")
-	s.server = &http.Server{Addr: addr, Handler: mux}
-
+	// Khởi động Goroutine quét Session (TTL)
 	go s.sweeper(ctx)
-	slog.Info("Fog server started", "addr", addr)
-	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
-	}
+
+	// Khởi động HTTP Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/register", s.handleRegister)
+	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
+
+	server := &http.Server{Addr: s.Address, Handler: mux}
+
+	// if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// 	slog.Error("Server HTTP failed to start", "error", err)
+	// }
+	// slog.Info("Server started", "address", s.Address)
+	// return nil
+	//
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("Server HTTP failed to start", "error", err)
+		}
+	}()
+	slog.Info("Server started", "address", s.Address)
+
+	<-ctx.Done()
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctxShutdown)
+	slog.Info("Server stopped")
 	return nil
 }
 
-// Shutdown stops the HTTP server.
-func (s *Server) Shutdown() error {
-	if s.server == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	slog.Info("Stopping Fog server")
-	if s.database != nil {
-		if err := s.database.Close(); err != nil {
-			slog.Warn("failed to close database", "error", err)
-			// Bạn có thể chọn trả về lỗi này hoặc lỗi server
-		} else {
-			slog.Info("Database connection closed")
-		}
-	}
-	return s.server.Shutdown(ctx)
-}
-
-// handleTelemetry accepts uplink telemetry and relays to app/websocket.
-func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close telemetry request body",
-					"component", "server", "error", err)
-			}
-		}
-	}()
-
-	gatewayIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		slog.Warn("cannot parse gateway address", "remote", r.RemoteAddr, "err", err)
-		gatewayIP = r.RemoteAddr
-	}
-	slog.Debug("received uplink from gateway", "ip", gatewayIP) // var exists bool
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	var telemetry model.VehicleData
-	if err := json.Unmarshal(body, &telemetry); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-
-	// Validate vehicle identity against DB: boat.boatID must match telemetry.VehicleID
-	if telemetry.VehicleID == "" {
-		// Reject telemetry without vehicle id — require GW to forward vehicle id
-		slog.Warn("telemetry without vehicle_id rejected", "from", gatewayIP)
-		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
-		return
-	}
-	boatDBID, gwID, err := s.lookupBoatByBoatID(telemetry.VehicleID)
-	if err != nil {
-		slog.Error("db error lookup boat", "vehicle", telemetry.VehicleID, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if boatDBID == 0 {
-		// unknown boatID -> reject (possible spoofing)
-		slog.Warn("telemetry for unknown boatID dropped", "boatID", telemetry.VehicleID, "from", gatewayIP)
-		http.Error(w, "unknown vehicle", http.StatusNotFound)
-		return
-	}
-
-	// Optional: check that the gateway IP matches the registered gateway for this boat (if gwID present)
-	if gwID.Valid {
-		var gwIP string
-		if err := s.database.QueryRow("SELECT ip FROM gateway WHERE id = ?", gwID.Int64).Scan(&gwIP); err == nil {
-			if gwIP != gatewayIP {
-				slog.Warn("gateway IP mismatch for telemetry",
-					"vehicle", telemetry.VehicleID, "expected_gw_ip", gwIP, "from", gatewayIP)
-				// we still accept telemetry but log warning. If you want strict: reject here.
-				// http.Error(w, "gateway mismatch", http.StatusForbidden); return
-			}
-		}
-	}
-
-	// Refresh or create session (extend TTL)
-	s.sessionMu.Lock()
-	if ses, ok := s.sessions[telemetry.VehicleID]; ok {
-		ses.CreatedAt = time.Now()
-		// TTL unchanged
-	} else {
-		// create with default TTL (5min)
-		s.sessions[telemetry.VehicleID] = &Session{
-			VehicleID: telemetry.VehicleID,
-			GatewayID: gatewayIP,
-			CreatedAt: time.Now(),
-			TTL:       5 * time.Minute,
-		}
-	}
-	s.sessionMu.Unlock()
-
-	out, _ := json.Marshal(telemetry)
-	s.broadcast(string(out))
-
-	// Forward telemetry to App Server if configured
-	if s.AppAddr != "" {
-		go func() {
-			resp, err := http.Post(
-				s.AppAddr+"/api/telemetry",
-				"application/json",
-				bytes.NewReader(out),
-			)
-			if err != nil {
-				slog.Warn(
-					"failed to forward telemetry",
-					"component", "fog",
-					"app", s.AppAddr,
-					"error", err,
-				)
-				return
-			}
-			if resp != nil && resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-		}()
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-// handleRegister registers a vehicle and returns session info.
+// handleRegister: Xử lý yêu cầu đăng ký mới từ Gateway (Hello Packet)
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn(
-					"failed to close register request body",
-					"component", "server",
-					"error", err,
-				)
-			}
-		}
-	}()
+	defer func() { _ = r.Body.Close() }()
 
-	var req struct {
-		GatewayID string `json:"gateway_id"`
-		VehicleID string `json:"vehicle_id"`
-	}
+	var req model.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	if req.VehicleID == "" || req.GatewayID == "" {
-		http.Error(w, "gateway_id or vehicle_id missing", http.StatusBadRequest)
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
 
-	// Find gateway DB id by its IP/address (gateway table must be populated)
-	var gwDBID int64
-	err := s.database.QueryRow("SELECT id FROM gateway WHERE ip = ?", req.GatewayID).Scan(&gwDBID)
-	if err == sql.ErrNoRows {
-		// If gateway not found, insert it (basic)
-		res, err := s.database.Exec("INSERT INTO gateway (name, ip) VALUES (?, ?)", req.GatewayID, req.GatewayID)
-		if err != nil {
-			slog.Error("db insert gateway failed", "gw", req.GatewayID, "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+	if req.VehicleID == "" || req.GatewayAddress == "" {
+		http.Error(w,
+			"vehicle and gateway required",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	s.mutex.Lock()
+	// 1. Logic Roaming/Trùng Session
+	if oldSes, ok := s.sessions[req.VehicleID]; ok {
+		// Release old slot and update DB to clear gateway
+		delete(s.sessions, req.VehicleID)
+		if oldSes.GatewayAddress != req.GatewayAddress {
+			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
+			// Update DB to clear gateway for vehicle (safeguard)
+			go func(vehicle, oldgw string) {
+				_ = s.database.UpdateVehicleGateway(
+					context.Background(),
+					vehicle,
+					"",
+				)
+				// push update to old gateway
+				go s.pushSlotUpdateToGateway(oldgw)
+			}(req.VehicleID, oldSes.GatewayAddress)
+			slog.Info(
+				"Roaming: cleared old session",
+				"vehicle", req.VehicleID,
+				"old_gw", oldSes.GatewayAddress,
+			)
+		} else {
+			// re-registration same gw: release slot so we can assign afresh
+			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
+			slog.Info(
+				"Re-registration: old slot released",
+				"vehicle", req.VehicleID,
+				"gw", req.GatewayAddress,
+			)
 		}
-		gwDBID, _ = res.LastInsertId()
-	} else if err != nil {
-		slog.Error("db query gateway failed", "gw", req.GatewayID, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+	// 2. Cấp Slot mới tại Gateway mới
+	newSlot := s.assignNewSlot(req.GatewayAddress)
+	if newSlot == -1 {
+		s.mutex.Unlock()
+		http.Error(w, "No slot available", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Upsert boat row: if exists update gwID, else insert.
-	// MySQL-style upsert using UNIQUE constraint on boat.boatID assumed.
-	_, err = s.database.Exec(
-		"INSERT INTO boat (name, boatID, gwID) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE gwID = VALUES(gwID)",
-		req.VehicleID, req.VehicleID, gwDBID,
+	// 3. Tạo Session mới
+	newSession := &Session{
+		VehicleID:      req.VehicleID,
+		GatewayAddress: req.GatewayAddress,
+		CreatedAt:      time.Now(),
+		TTL:            60 * time.Second, // Mặc định 60s TTL
+		Slot:           newSlot,
+	}
+	s.sessions[req.VehicleID] = newSession
+	s.mutex.Unlock()
+	slog.Info("New Session created",
+		"vehicle", req.VehicleID,
+		"gw", req.GatewayAddress,
+		"slot", newSlot,
 	)
-	if err != nil {
-		slog.Error("db upsert boat failed", "vehicle", req.VehicleID, "gw_id", gwDBID, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+
+	// 4. Cập nhật DB (Boat -> GatewayID)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+	if err := s.database.UpdateVehicleGateway(
+		ctx, req.VehicleID, req.GatewayAddress,
+	); err != nil {
+		slog.Error(
+			"DB update failed during register",
+			"vehicle", req.VehicleID, "error", err,
+		)
+		// try to rollback session
+		s.mutex.Lock()
+		delete(s.sessions, req.VehicleID)
+		s.releaseSlot(req.GatewayAddress, newSlot)
+		s.mutex.Unlock()
+		http.Error(w, "DB error", http.StatusInternalServerError)
 		return
 	}
 
-	// create session for this vehicle
-	s.sessionMu.Lock()
-	slot := s.assignSlot(req.VehicleID)
-	s.sessions[req.VehicleID] = &Session{
-		VehicleID: req.VehicleID,
-		GatewayID: req.GatewayID,
-		CreatedAt: time.Now(),
-		TTL:       5 * time.Minute,
-		Slot:      slot,
-	}
-	s.sessionMu.Unlock()
+	// 5. Quan trọng: Push danh sách Slot mới xuống Gateway
+	go s.pushSlotUpdateToGateway(req.GatewayAddress)
 
-	resp := map[string]any{
-		"vehicle_id":         req.VehicleID,
-		"ttl":                300,
-		"slot":               slot,
-		"cycle_start":        time.Now().Unix(), // gateway may use this as immediate cycle start
-		"cycle_period_sec":   30,                // example: total cycle length (tune as needed)
-		"slot_duration_ms":   4000,              // slot length in ms (example)
-		"guard_ms":           300,
-		"register_window_ms": 3000,
+	// w.WriteHeader(http.StatusOK)
+	// Respond with slot details
+	resp := model.RegisterResponse{
+		Slot:           newSlot,
+		GatewayAddress: req.GatewayAddress,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Warn("failed to encode register response", "error", err)
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(&resp); err != nil {
+		slog.Error("failed to write register response", "err", err)
 	}
-	slog.Info(
-		"registered vehicle",
-		"vehicle", req.VehicleID,
-		"gateway", req.GatewayID,
-		"slot", slot,
-	)
 }
 
-// handleControl forwards control messages to the target gateway.
-func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control request body",
-					"component", "server", "error", err)
-			}
+// handleTelemetry: Xử lý dữ liệu Telemetry và Reset TTL
+func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
+	defer func() { _ = r.Body.Close() }()
+
+	var telem model.VehicleData
+	if err := json.NewDecoder(r.Body).Decode(&telem); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	s.mutex.Lock()
+	if ses, ok := s.sessions[telem.VehicleID]; ok {
+		ses.CreatedAt = time.Now() // Reset TTL
+		slog.Debug("Telemetry received, TTL reset", "vehicle", telem.VehicleID)
+		// forward to app server (if configured) - safe call with timeout
+		if s.AppAddress != "" {
+			go func(t model.VehicleData) {
+				ctx, cancel := context.WithTimeout(
+					context.Background(),
+					3*time.Second,
+				)
+				defer cancel()
+				body, _ := json.Marshal(t)
+				req, err := http.NewRequestWithContext(ctx,
+					"POST",
+					"http://"+s.AppAddress+"/api/telemetry",
+					bytes.NewReader(body),
+				)
+				if err != nil {
+					slog.Warn("failed build forward request", "err", err)
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := s.httpClient.Do(req)
+				if err != nil {
+					slog.Warn("forward telemetry failed", "err", err)
+					return
+				}
+				_ = resp.Body.Close()
+			}(telem)
 		}
-	}()
+	} else {
+		// session unknown: log and drop
+		slog.Warn("Telemetry received for unknown session", "vehicle", telem.VehicleID)
+	}
+	s.mutex.Unlock()
 
-	var ctrl map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	vehicleID, _ := ctrl["vehicle_id"].(string)
-	if vehicleID == "" {
-		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
-		return
-	}
-
-	// Query gateway IP by joining boat -> gateway
-	var gatewayIP string
-	err := s.database.QueryRow(
-		`SELECT g.ip FROM gateway g 
-         JOIN boat b ON b.gwID = g.id
-         WHERE b.boatID = ?`, vehicleID,
-	).Scan(&gatewayIP)
-	if err == sql.ErrNoRows {
-		http.Error(w, "gateway not found for vehicle", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		slog.Error("db error lookup gateway", "vehicle", vehicleID, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	payload, _ := json.Marshal(ctrl)
-	go func() {
-		resp, err := http.Post(gatewayIP+"/command",
-			"application/json", bytes.NewReader(payload))
-		if err != nil {
-			slog.Warn("failed to send control to gateway",
-				"component", "fog", "gateway", gatewayIP, "error", err)
-			return
-		}
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		slog.Info("control forwarded",
-			"component", "fog", "vehicle", vehicleID, "gateway", gatewayIP)
-	}()
-	w.WriteHeader(http.StatusAccepted)
-}
-
-// handleWebSocket provides live telemetry streaming to dashboard clients.
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	s.clientMu.Lock()
-	s.clients[conn] = true
-	s.clientMu.Unlock()
-
-	go func() {
-		defer func() {
-			s.clientMu.Lock()
-			delete(s.clients, conn)
-			s.clientMu.Unlock()
-			if err := conn.Close(); err != nil {
-				slog.Warn("failed to close websocket", "error", err)
-			}
-		}()
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}()
-}
-
-// handleGatewayReport logs periodic gateway reports.
-func (s *Server) handleGatewayReport(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if r.Body != nil {
-			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close report request body",
-					"component", "server", "error", err)
-			}
-		}
-	}()
-
-	var rep struct {
-		GWID      string `json:"gw_id"`
-		Region    string `json:"region"`
-		SlotUsage int    `json:"slotUsage"`
-		AvgDelay  int    `json:"avgDelay"`
-		Collision int    `json:"collision"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	slog.Info("gateway report", "gw", rep.GWID, "usage", rep.SlotUsage, "delay", rep.AvgDelay, "coll", rep.Collision)
 	w.WriteHeader(http.StatusOK)
 }
 
-// sweeper cleans expired sessions.
+// sweeper: Quét các Session đã hết hạn (TTL Expired)
 func (s *Server) sweeper(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+		case <-ticker.C:
+			s.mutex.Lock()
 			now := time.Now()
-			s.sessionMu.Lock()
-			var removed []string
-			for k, v := range s.sessions {
-				if now.Sub(v.CreatedAt) > v.TTL {
-					delete(s.sessions, k)
-					removed = append(removed, k)
-					slog.Info("session expired", "vehicle", k)
+			dirtyGateways := make(map[string]bool)
+
+			for vID, ses := range s.sessions {
+				if now.Sub(ses.CreatedAt) > ses.TTL {
+					slog.Info(
+						"Session expired (TTL)",
+						"vehicle", vID, "gw", ses.GatewayAddress,
+					)
+
+					// 1. Cập nhật DB -> NULL/Empty
+					// Update DB -> NULL/Empty
+					go func(vehicle string) {
+						_ = s.database.UpdateVehicleGateway(context.Background(), vehicle, "")
+					}(vID)
+
+					// 2. Release Slot và đánh dấu Gateway cần cập nhật
+					s.releaseSlot(ses.GatewayAddress, ses.Slot)
+					dirtyGateways[ses.GatewayAddress] = true
+
+					// 3. Xóa session
+					delete(s.sessions, vID)
 				}
 			}
-			s.sessionMu.Unlock()
-			// Optionally: inform gateways that slots freed (could send to all registered gateways).
-			if len(removed) > 0 {
-				slog.Debug("freed slots for vehicles", "vehicles", removed)
-				// Implementation: iterate registered gateways and POST update; omitted here for brevity.
+			s.mutex.Unlock()
+
+			// 4. Báo cho các Gateway có thay đổi session để cập nhật Beacon
+			for gwID := range dirtyGateways {
+				go s.pushSlotUpdateToGateway(gwID)
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-// broadcast sends message to all connected WebSocket clients.
-func (s *Server) broadcast(msg string) {
-	s.clientMu.Lock()
-	defer s.clientMu.Unlock()
-	for conn := range s.clients {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
-			slog.Warn("websocket send failed",
-				"component", "fog", "error", err)
-		}
+// assignNewSlot: Tìm và cấp phát slot mới cho Gateway (trong lock)
+func (s *Server) assignNewSlot(gwAddr string) int {
+	if _, ok := s.gatewaySlots[gwAddr]; !ok {
+		s.gatewaySlots[gwAddr] = make(map[int]bool)
 	}
-}
 
-// --- helper: check boat exists by boatID and get boat.id and gwID ---
-func (s *Server) lookupBoatByBoatID(boatID string) (boatDBID int64, gwID sql.NullInt64, err error) {
-	var id sql.NullInt64
-	var gw sql.NullInt64
-	// boat table: id, name, boatID, gwID
-	err = s.database.QueryRow("SELECT id, gwID FROM boat WHERE boatID = ?", boatID).Scan(&id, &gw)
-	if err == sql.ErrNoRows {
-		return 0, sql.NullInt64{}, nil // not found
-	}
-	if err != nil {
-		return 0, sql.NullInt64{}, err
-	}
-	return id.Int64, gw, nil
-}
-
-// --- new helper: assignSlot
-// CHANGED: simple sequential slot allocator, reuses freed slots.
-// In production you may want more robust allocation (per gateway/region).
-func (s *Server) assignSlot(vehicleID string) int {
-	// naive: find first unused slot in [0, MaxSlots)
-	const MaxSlots = 64 // tune per your network
-	used := make([]bool, MaxSlots)
-	for _, ses := range s.sessions {
-		if ses != nil {
-			if ses.Slot >= 0 && ses.Slot < MaxSlots {
-				used[ses.Slot] = true
-			}
-		}
-	}
-	// if already assigned, return existing
-	if ses, ok := s.sessions[vehicleID]; ok {
-		return ses.Slot
-	}
-	for i := range MaxSlots {
-		if !used[i] {
+	// Bắt đầu tìm từ slot 1, tối đa 20 slot
+	for i := 1; i <= 20; i++ {
+		if !s.gatewaySlots[gwAddr][i] {
+			s.gatewaySlots[gwAddr][i] = true
 			return i
 		}
 	}
-	// fallback: modulo hash
-	return int(time.Now().UnixNano() % MaxSlots)
+	slog.Error("Max slots reached", "gateway", gwAddr)
+	return -1 // Không thể cấp slot
+}
+
+// releaseSlot: Giải phóng slot (trong lock)
+func (s *Server) releaseSlot(gwID string, slot int) {
+	if slots, ok := s.gatewaySlots[gwID]; ok {
+		delete(slots, slot)
+	}
+}
+
+// pushSlotUpdateToGateway: Gửi danh sách Slot Map đầy đủ xuống Gateway
+func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
+	s.mutex.Lock()
+	// Tạo SlotMap chỉ chứa các vehicle thuộc Gateway này
+	slotMap := make(map[string]int)
+	for _, ses := range s.sessions {
+		if ses.GatewayAddress == gwAddr {
+			slotMap[ses.VehicleID] = ses.Slot
+		}
+	}
+	s.mutex.Unlock()
+
+	// Gửi POST xuống Gateway /api/update_beacon
+	body, _ := json.Marshal(slotMap)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+
+	// Lưu ý: Giả định gwAddr là địa chỉ HTTP (ví dụ: localhost:8081)
+	req, err := http.NewRequestWithContext(ctx,
+		"POST",
+		"http://"+gwAddr+"/api/update_beacon",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		slog.Error(
+			"Failed to build request for gateway",
+			"gw", gwAddr, "err", err,
+		)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		slog.Error(
+			"Failed to push slot update to Gateway",
+			"gw_addr", gwAddr, "error", err,
+		)
+		return
+	}
+	// Ensure body closed
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("Gateway rejected slot update", "gw_addr", gwAddr, "status", resp.Status)
+	} else {
+		slog.Info("Successfully pushed slot map to Gateway", "gw_addr", gwAddr, "count", len(slotMap))
+	}
 }

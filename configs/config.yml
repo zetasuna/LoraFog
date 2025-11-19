@@ -3,13 +3,11 @@ server:
   app_address: "127.0.0.1:3001"
 
 gateways:
-  - id: "GW01"
-    address: "127.0.0.1:10001"
+  - address: "127.0.0.1:10001"
     server_address: "127.0.0.1:10000"
     lora_device: "/tmp/ttyGW1"
     lora_baud: 9600
-  - id: "GW02"
-    address: "127.0.0.1:10002"
+  - address: "127.0.0.1:10002"
     server_address: "127.0.0.1:10000"
     lora_device: "/tmp/ttyGW2"
     lora_baud: 9600

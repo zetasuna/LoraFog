@@ -3,13 +3,13 @@ package core
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
 	"time"
 
+	"LoraFog/internal/database"
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
 	"LoraFog/internal/util"
@@ -25,6 +25,7 @@ type System struct {
 	gateways     []*Gateway
 	vehicles     []*Vehicle
 	arduinos     []*device.Arduino
+	serverDB     *database.ServerDB
 	socatManager *util.SocatManager
 
 	cancel context.CancelFunc
@@ -49,52 +50,49 @@ func NewSystem(path string) (*System, error) {
 	}
 
 	for _, vs := range cfg.VirtualSerials {
-		_ = sys.socatManager.CreatePair(
+		if err := sys.socatManager.CreatePair(
 			vs.Left,
 			vs.Right,
-		)
+		); err != nil {
+			slog.Error("Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
+		}
 	}
 	time.Sleep(300 * time.Millisecond)
 
 	// 1. Mở kết nối DB ở đây (trong main)
-	db, err := sql.Open("mysql", "admin:admin@tcp(localhost:3006)/boat")
+	dsn := "admin:admin@tcp(localhost:3006)/boat"
+	sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
 	if err != nil {
-		slog.Error("failed to configure database", "error", err)
-		// os.Exit(1)
+		slog.Error("Database established fail", "error", err)
+	} else {
+		slog.Info("Database established success")
 	}
-
-	// 2. Ping DB để xác nhận kết nối
-	if err := db.Ping(); err != nil {
-		slog.Error("failed to connect to database", "error", err)
-		// os.Exit(1)
-	}
-	slog.Info("Database connection established")
-	if cfg.Server.Addr != "" {
+	if cfg.Server.Address != "" {
 		sys.server = NewServer(
-			cfg.Server.Addr,
-			cfg.Server.AppAddr,
-			db,
+			cfg.Server.Address,
+			cfg.Server.AppAddress,
+			sys.serverDB,
 		)
 	}
 	for _, g := range cfg.Gateways {
 		sys.gateways = append(sys.gateways, NewGateway(
-			g.LoraDev,
+			g.Address,
+			g.ServerAddress,
+			g.LoraDevice,
 			g.LoraBaud,
-			g.Addr,
-			g.ServerAddr,
 		))
 	}
 	for _, v := range cfg.Vehicles {
 		sys.vehicles = append(sys.vehicles, NewVehicle(
-			v.ID,
-			v.LoraDev,
+			v.VehicleID,
+			v.LoraDevice,
 			v.LoraBaud,
-			v.ArduinoDev,
+			v.ArduinoDevice,
 			v.ArduinoBaud,
 		))
 	}
 	for _, a := range cfg.Arduinos {
-		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Dev, a.Baud))
+		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Device, a.Baud))
 	}
 
 	return sys, nil
@@ -137,26 +135,29 @@ func (s *System) Start(ctx context.Context) error {
 }
 
 // Shutdown gracefully stops all components.
-func (s *System) Shutdown() {
-	slog.Info("system shutting down")
+func (s *System) Stop() {
+	slog.Info("System is stopping...")
 	if s.cancel != nil {
 		s.cancel()
 	}
 	for _, gw := range s.gateways {
-		gw.Shutdown()
+		gw.Stop()
 	}
 	for _, vh := range s.vehicles {
-		vh.Shutdown()
+		vh.Stop()
 	}
 	for _, ino := range s.arduinos {
 		_ = ino.Close()
 	}
-	if s.server != nil {
-		_ = s.server.Shutdown()
+	// if s.server != nil {
+	// 	_ = s.server.Stop()
+	// }
+	if s.serverDB != nil {
+		_ = s.serverDB.Close()
 	}
 	if s.socatManager != nil {
 		s.socatManager.Cleanup()
 	}
 	s.wg.Wait()
-	slog.Info("shutdown complete")
+	slog.Info("Shutdown complete")
 }

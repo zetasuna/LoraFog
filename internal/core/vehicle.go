@@ -1,11 +1,12 @@
-// Package core implements the Vehicle agent responsible for collecting telemetry
-// from Arduino devices and sending CBOR-encoded data via LoRa.
+// Package core implements the Vehicle agent
+// responsible for collecting telemetry from Arduino devices
+// and sending CBOR-encoded data via LoRa.
 package core
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -15,24 +16,45 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Vehicle represents a single autonomous vehicle communicating via LoRa.
+// VehicleState định nghĩa trạng thái của xe
+type VehicleState int
+
+const (
+	StateIdle    VehicleState = 0 // Chờ Beacon, chưa có slot
+	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
+	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
+)
+
+// Vehicle là đại diện cho thiết bị thuyền/xe
 type Vehicle struct {
-	ID          string
-	lora        *device.Lora
-	arduino     *device.Arduino
-	sessionKey  []byte
-	leaseExpiry time.Time
+	ID      string
+	lora    *device.Lora
+	arduino *device.Arduino // Có thể nil nếu dùng dữ liệu giả lập
+
+	state          VehicleState
+	currentGateway string
+	assignedSlot   int
+
+	// Cache dữ liệu telemetry mới nhất từ Arduino
+	mu            sync.Mutex
+	lastTelemetry model.ArduinoData
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// NewVehicle constructs a Vehicle agent with LoRa and optional Arduino connection.
-func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud int) *Vehicle {
+// NewVehicle tạo một Vehicle mới
+func NewVehicle(
+	id string,
+	loraDev string, loraBaud int,
+	arduinoDev string, arduinoBaud int,
+) *Vehicle {
 	lora := device.NewLora(loraDev, loraBaud)
 	v := &Vehicle{
-		ID:   id,
-		lora: lora,
+		ID:           id,
+		lora:         lora,
+		state:        StateIdle,
+		assignedSlot: -1,
 	}
 	if arduinoDev != "" {
 		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
@@ -40,214 +62,297 @@ func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud
 	return v
 }
 
-// Start begins the vehicle telemetry and control loops.
 func (v *Vehicle) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	v.cancel = cancel
 
-	// --- Arduino telemetry reader ---
+	slog.Info("Vehicle starting", "id", v.ID)
+
+	// 1. Goroutine đọc Arduino liên tục để update lastTelem
 	if v.arduino != nil {
-		dataCh := make(chan model.ArduinoData, 5)
-		stop, err := v.arduino.Read(dataCh)
-		if err != nil {
-			slog.Warn("failed to start Arduino reader",
-				"component", "vehicle", "id", v.ID, "error", err)
-		} else {
-			slog.Info("Arduino telemetry reader started",
-				"component", "vehicle", "id", v.ID)
-			v.wg.Add(1)
-			go func() {
-				defer v.wg.Done()
-				for {
-					select {
-					case <-ctx.Done():
-						slog.Info("stopping Arduino telemetry loop",
-							"component", "vehicle", "id", v.ID)
-						return
-					case data, ok := <-dataCh:
-						if !ok {
-							slog.Info("Arduino telemetry channel closed",
-								"component", "vehicle", "id", v.ID)
-							return
-						}
-						v.sendTelemetry(data)
-					}
-				}
-			}()
-			v.wg.Add(1)
-			go func() {
-				defer v.wg.Done()
-				<-ctx.Done()
-				stop()
-			}()
-		}
-	}
-
-	// --- LoRa control listener ---
-	if v.lora != nil && v.arduino != nil {
 		v.wg.Add(1)
-		go func() {
-			defer v.wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					slog.Info("stopping LoRa control listener",
-						"component", "vehicle", "id", v.ID)
-					return
-				default:
-				}
-
-				frame, err := v.lora.ReadFrame()
-				if err != nil {
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
-
-				var ctl model.ControlData
-				if err := cbor.Unmarshal(frame, &ctl); err != nil {
-					slog.Warn("invalid control CBOR packet",
-						"component", "vehicle", "id", v.ID, "error", err)
-					continue
-				}
-				if ctl.VehicleID != v.ID {
-					slog.Warn("control ignored (wrong target)",
-						"component", "vehicle", "id", v.ID, "target", ctl.VehicleID)
-					continue
-				}
-
-				out := fmt.Sprintf("%d,%.6f,%.6f,%.3f,%.3f,%.3f",
-					ctl.Speed, ctl.Latitude, ctl.Longitude, ctl.Kp, ctl.Ki, ctl.Kd)
-				if err := v.arduino.Write(out); err != nil {
-					slog.Warn("failed to forward control to Arduino",
-						"component", "vehicle", "id", v.ID, "error", err)
-				} else {
-					slog.Info("control forwarded to Arduino",
-						"component", "vehicle", "id", v.ID)
-				}
-			}
-		}()
+		go v.arduinoLoop(ctx)
 	}
 
-	// start beacon listener (reads frames and handles beacon/ auth)
+	// 2. Goroutine chính: LoRa Loop (State Machine)
 	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			frame, err := v.lora.ReadFrameWithTimeout(10 * time.Second)
-			if err != nil {
-				// timeout is normal
-				continue
-			}
-			// try to detect message type
-			var generic map[string]any
-			if err := cbor.Unmarshal(frame, &generic); err != nil {
-				slog.Warn("invalid cbor frame", "component", "vehicle", "id", v.ID, "error", err)
-				continue
-			}
-			if t, ok := generic["type"].(string); ok {
-				switch t {
-				case "beacon":
-					// respond with hello
-					var b model.BeaconMessage
-					_ = cbor.Unmarshal(frame, &b)
-					hello := model.HelloMessage{VehicleID: v.ID}
-					hb, _ := cbor.Marshal(hello)
-					_ = v.lora.WriteFrame(hb)
-					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.Gateway)
-				case "auth":
-					// receive auth (key)
-					var a model.AuthMessage
-					_ = cbor.Unmarshal(frame, &a)
-					// v.sessionKey = a.Key
-					v.leaseExpiry = time.Now().Add(time.Duration(a.TTL) * time.Second)
-					slog.Info("received auth and stored session key", "component", "vehicle", "id", v.ID, "ttl", a.TTL)
-				default:
-					// other types ignored here
-				}
-			}
-		}
-	}()
-
-	// renew loop: if we have a key, periodically send a light "renew" (or telemetry) to keep lease alive
-	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if v.sessionKey != nil && time.Now().Before(v.leaseExpiry) {
-					// send a short renew packet (could be telemetry too)
-					msg := map[string]any{"type": "renew", "vehicle_id": v.ID}
-					b, _ := cbor.Marshal(msg)
-					_ = v.lora.WriteFrame(b)
-					slog.Debug("sent renew", "component", "vehicle", "id", v.ID)
-				} else if v.sessionKey != nil && time.Now().After(v.leaseExpiry) {
-					// lease expired locally: drop key
-					v.sessionKey = nil
-					slog.Info("session expired locally, dropped key", "component", "vehicle", "id", v.ID)
-				}
-			}
-		}
-	}()
+	go v.loraLoop(ctx)
 
 	return nil
 }
 
-// Shutdown stops all goroutines and closes devices safely.
-func (v *Vehicle) Shutdown() {
+func (v *Vehicle) Stop() {
 	if v.cancel != nil {
 		v.cancel()
 	}
 	if v.lora != nil {
 		if err := v.lora.Close(); err != nil {
-			slog.Warn("failed to close LoRa device",
-				"component", "vehicle", "id", v.ID, "error", err)
+			slog.Warn("Failed to close LoRa device", "error", err)
 		}
 	}
 	if v.arduino != nil {
 		if err := v.arduino.Close(); err != nil {
-			slog.Warn("failed to close Arduino device",
-				"component", "vehicle", "id", v.ID, "error", err)
+			slog.Warn("Failed to close Arduino device", "error", err)
 		}
 	}
 	v.wg.Wait()
-	slog.Info("vehicle stopped", "component", "vehicle", "id", v.ID)
+	slog.Info("Vehicle stopped", "id", v.ID)
 }
 
-// sendTelemetry encodes Arduino telemetry as CBOR and writes it via LoRa.
-func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
-	data := model.VehicleData{
-		VehicleID:   v.ID,
-		Latitude:    a.Latitude,
-		Longitude:   a.Longitude,
-		CurrentHead: a.CurrentHead,
-		TargetHead:  a.TargetHead,
-		LeftSpeed:   a.LeftSpeed,
-		RightSpeed:  a.RightSpeed,
-	}
-
-	payload, err := cbor.Marshal(data)
+// arduinoLoop đọc dữ liệu từ Arduino/Simulator
+func (v *Vehicle) arduinoLoop(ctx context.Context) {
+	defer v.wg.Done()
+	dataCh := make(chan model.ArduinoData, 5)
+	stop, err := v.arduino.Read(dataCh)
 	if err != nil {
-		slog.Warn("failed to encode telemetry CBOR",
-			"component", "vehicle", "id", v.ID, "error", err)
+		slog.Warn("Arduino.Read returned error", "err", err)
 		return
 	}
-	if v.lora != nil {
-		if err := v.lora.WriteFrame(payload); err != nil {
-			slog.Warn("failed to send telemetry",
-				"component", "vehicle", "id", v.ID, "error", err)
-		} else {
-			slog.Debug("telemetry sent",
-				"component", "vehicle", "id", v.ID)
+	defer stop()
+
+	// Khởi tạo data giả nếu arduino nil
+	if v.arduino == nil {
+		v.mu.Lock()
+		v.lastTelemetry = model.ArduinoData{
+			Latitude:    21.027 + rand.Float64()*0.001,
+			Longitude:   105.835 + rand.Float64()*0.001,
+			CurrentHead: rand.Int63n(361),
+			TargetHead:  rand.Int63n(361),
+			LeftSpeed:   1000 + rand.Int63n(1000),
+			RightSpeed:  1000 + rand.Int63n(1000),
 		}
+		v.mu.Unlock()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-dataCh:
+			if !ok {
+				return
+			}
+			v.mu.Lock()
+			v.lastTelemetry = data
+			v.mu.Unlock()
+		}
+	}
+}
+
+// loraLoop là State Machine chính của Vehicle
+func (v *Vehicle) loraLoop(ctx context.Context) {
+	defer v.wg.Done()
+
+	// Sử dụng giá trị mặc định cho timeout chờ beacon (ví dụ: 5 giây)
+	beaconTimeout := 5 * time.Second
+	var lastBeaconTime time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Lắng nghe Beacon
+			frame, err := v.lora.Read(beaconTimeout)
+			if err != nil {
+				// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
+				// // timeout handling
+				if err == device.ErrLoraTimeout {
+					// if we had a previous beacon and too long passed -> reset
+					if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
+						if v.state != StateIdle {
+							slog.Warn("Lost beacon connection, resetting to IDLE", "id", v.ID)
+						}
+						v.state = StateIdle
+						v.currentGateway = ""
+						v.assignedSlot = -1
+					}
+					continue
+				}
+				// Nếu đã Idle thì cứ tiếp tục lắng nghe
+				slog.Error("Lora read error", "err", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			var beacon model.BeaconMessage
+			if err := cbor.Unmarshal(frame, &beacon); err != nil {
+				// Có thể là packet Control hoặc nhiễu
+				slog.Debug("Received non-beacon frame or corrupted beacon", "err", err)
+				continue
+			}
+
+			// record last beacon time and timestamp (ms)
+			lastBeaconTime = time.Now()
+
+			// Xử lý logic dựa trên State và Beacon nhận được
+			v.handleBeacon(ctx, beacon)
+		}
+	}
+}
+
+func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
+	// Logic Roaming: Nếu gateway ID khác với hiện tại và đã có slot
+	if v.state == StateSending && v.currentGateway != "" && v.currentGateway != b.GatewayAddress {
+		slog.Info("Roaming detected, preparing to switch", "old", v.currentGateway, "new", b.GatewayAddress)
+		v.state = StateIdle // Reset về Idle để đăng ký lại với Gateway mới
+		v.assignedSlot = -1
+		// gửi lại hello ngay lập tức
+		hello := model.HelloMessage{Type: "hello", VehicleID: v.ID}
+		payload, _ := cbor.Marshal(hello)
+		if err := v.lora.Write(payload); err != nil {
+			slog.Warn("Failed to send hello during roaming", "err", err)
+		} else {
+			slog.Info("Sent HELLO after roaming", "vehicle", v.ID)
+			v.state = StateJoining
+		}
+		v.currentGateway = b.GatewayAddress
+		return
+	}
+	// Luôn cập nhật Gateway ID mới nhất
+	v.currentGateway = b.GatewayAddress
+
+	switch v.state {
+	case StateIdle:
+		slog.Info("Received Beacon (Idle), preparing to send Hello", "gw", b.GatewayAddress)
+
+		// Tính thời gian đợi đến Register Window
+		cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
+		regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
+		regStartOffset := cycleDuration - regWindow
+
+		// Thời gian ngủ: Bằng độ dài chu kỳ - thời điểm bắt đầu Register Window + delay ngẫu nhiên nhỏ
+		// Ví dụ: Chu kỳ 2000ms, Register Window 300ms. regStartOffset = 1700ms.
+		// Time to sleep = 1700ms + (0-150ms)
+		// timeToSleep := regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond
+		// time.Sleep(timeToSleep)
+		// Calculate actual offset between local time and beacon timestamp (ms)
+		now := time.Now().UnixNano() / int64(time.Millisecond)
+		delta := now - b.Timestamp
+		// time until regStart since now = regStartOffset - delta
+		sleep := regStartOffset - time.Duration(delta)*time.Millisecond
+		if sleep < 0 {
+			// if we are already in/after reg window, send soon (small random backoff)
+			sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(sleep):
+		}
+
+		// Gửi Hello
+		msg := model.HelloMessage{Type: "hello", VehicleID: v.ID}
+		payload, _ := cbor.Marshal(msg)
+		if err := v.lora.Write(payload); err != nil {
+			slog.Warn("Failed to write Hello", "err", err)
+		} else {
+			v.state = StateJoining
+			slog.Info("Sent Hello, state -> JOINING", "id", v.ID)
+		}
+	case StateJoining:
+		// Trạng thái CHUẨN BỊ GỬI: Kiểm tra xem trong Beacon mới có Slot cho mình chưa
+		if slot, ok := b.SlotMap[v.ID]; ok {
+			v.assignedSlot = slot
+			v.state = StateSending
+			// slog.Info("Joined successfully", "slot", slot, "state -> SENDING")
+			// Sau khi nhận beacon (T0), thực hiện TDMA gửi ngay trong chu kỳ này
+			v.performTDMA(b)
+		} else {
+			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
+			slog.Warn("Waiting for slot assignment...", "id", v.ID)
+
+			cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
+			regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
+			regStartOffset := cycleDuration - regWindow
+			// regStartOffset := cycleDuration - time.Duration(b.RegisterWindowMs)*time.Millisecond
+
+			// Ngủ đến Register Window tiếp theo
+			// time.Sleep(regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond)
+
+			now := time.Now().UnixNano() / int64(time.Millisecond)
+			delta := now - b.Timestamp
+			sleep := regStartOffset - time.Duration(delta)*time.Millisecond
+			if sleep < 0 {
+				sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(sleep):
+			}
+
+			msg := model.HelloMessage{Type: "hello", VehicleID: v.ID}
+			payload, _ := cbor.Marshal(msg)
+			if err := v.lora.Write(payload); err != nil {
+				slog.Warn("Failed to write Hello (retry)", "err", err)
+			} else {
+				slog.Info("Resent Hello (JOINING)", "vehicle", v.ID)
+			}
+			// State vẫn là Joining
+		}
+
+	case StateSending:
+		// Trạng thái GỬI: Kiểm tra lại SlotMap xem còn được cấp phép không
+		if slot, ok := b.SlotMap[v.ID]; ok {
+			v.assignedSlot = slot // Cập nhật slot nếu Gateway thay đổi
+			v.performTDMA(b)
+		} else {
+			slog.Warn("Lost slot allocation, returning to IDLE", "id", v.ID)
+			v.state = StateIdle
+			v.assignedSlot = -1
+		}
+	}
+}
+
+// performTDMA tính toán thời gian ngủ và gửi Telemetry đúng Slot
+func (v *Vehicle) performTDMA(b model.BeaconMessage) {
+	// Tính toán thời điểm gửi: (SlotIndex-1) * (SlotDur + Guard)
+	// SlotIndex 1: (1-1)*... = 0ms. Gửi ngay. (Đây là cách tính đơn giản)
+	// SlotIndex n: (n-1) * (SlotDur + Guard)
+
+	slotIndex := max(0, v.assignedSlot-1)
+	oneSlot := time.Duration(b.SlotDurationMs)*time.Millisecond + time.Duration(b.GuardTimeMs)*time.Millisecond
+	slotTimeFromStart := time.Duration(slotIndex) * oneSlot
+
+	// Calculate delta between now and beacon timestamp
+	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+	deltaMs := nowMs - b.Timestamp
+	sleep := slotTimeFromStart - time.Duration(deltaMs)*time.Millisecond
+	if sleep < 0 {
+		// if we missed slot, do not block; wait next cycle
+		slog.Debug(
+			"Missed slot timing, skipping this cycle",
+			"vehicle", v.ID, "slot", v.assignedSlot)
+		return
+	}
+
+	// Ngủ đến đúng slot
+	// time.Sleep(slotTimeFromStart)
+	time.Sleep(sleep)
+
+	// Lấy dữ liệu mới nhất
+	v.mu.Lock()
+	data := v.lastTelemetry
+	v.mu.Unlock()
+
+	// Đóng gói
+	pkt := model.VehicleData{
+		Type:        model.PacketTelemetry,
+		VehicleID:   v.ID,
+		Latitude:    data.Latitude,
+		Longitude:   data.Longitude,
+		CurrentHead: data.CurrentHead,
+		TargetHead:  data.TargetHead,
+		LeftSpeed:   data.LeftSpeed,
+		RightSpeed:  data.RightSpeed,
+	}
+	payload, _ := cbor.Marshal(pkt)
+
+	// Gửi
+	if err := v.lora.Write(payload); err != nil {
+		slog.Warn("Failed to send telemetry", "err", err)
+	} else {
+		slog.Debug("Sent Telemetry (TDMA)", "slot", v.assignedSlot)
 	}
 }

@@ -1,11 +1,6 @@
 // Package util provides helpers for virtual serial management using socat.
 package util
 
-// CHANGELOG (refactor v2):
-// - Improved process tracking and safe cleanup
-// - Added context-aware start with error handling
-// - Standardized naming and structured logging
-
 import (
 	"context"
 	"fmt"

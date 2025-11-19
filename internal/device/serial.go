@@ -1,12 +1,5 @@
 // Package device implements a simple wrapper for serial communication.
-// It provides non-blocking read/write methods with optional timeout.
 package device
-
-// CHANGELOG (refactor v2):
-// - Safe read/write with timeout
-// - Added context support via external control
-// - Structured logging (slog)
-// - Safe Close() checks and standardized naming
 
 import (
 	"bufio"
@@ -19,6 +12,8 @@ import (
 
 	"go.bug.st/serial"
 )
+
+var ErrSerialTimeout = errors.New("serial read timeout")
 
 // Serial represents a simple serial port connection.
 type Serial struct {
@@ -83,20 +78,41 @@ func (s *Serial) WriteLine(data string) error {
 	return nil
 }
 
-// ReadBytes reads exactly n bytes from the serial port.
-// It blocks until all bytes are received or an error occurs.
-func (s *Serial) ReadBytes(n int) ([]byte, error) {
+// ReadBytes reads exactly n bytes from the serial port with a timeout.
+// Timeout=0 means blocking indefinitely.
+func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 	if s.Port == nil {
 		return nil, errors.New("serial port not initialized")
 	}
 	buf := make([]byte, n)
-	total := 0
-	for total < n {
-		readCount, err := io.ReadFull(s.reader, buf[total:])
-		total += readCount
-		if err != nil {
-			return nil, err
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Thiết lập timeout cho Port trước khi đọc
+	if err := s.Port.SetReadTimeout(timeout); err != nil {
+		slog.Warn("failed to set read timeout", "component", "serial", "path", s.Path, "error", err)
+	}
+
+	// 2. Đọc từ bufio.Reader
+	readCount, err := io.ReadFull(s.reader, buf)
+
+	// 3. Reset timeout về blocking (0) sau khi đọc xong
+	_ = s.Port.SetReadTimeout(0)
+
+	if err != nil {
+		// Chuẩn hóa lỗi Timeout
+		if errors.Is(err, ErrSerialTimeout) || errors.Is(err, io.EOF) {
+			return nil, ErrSerialTimeout
 		}
+		if errors.Is(err, io.ErrUnexpectedEOF) && readCount > 0 {
+			return nil, fmt.Errorf("read incomplete: %w", err)
+		}
+		return nil, err
+	}
+
+	if readCount != n {
+		return nil, fmt.Errorf("read incomplete: expected %d, got %d", n, readCount)
 	}
 	return buf, nil
 }
