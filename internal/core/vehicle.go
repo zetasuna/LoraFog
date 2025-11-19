@@ -2,14 +2,6 @@
 // from Arduino devices and sending CBOR-encoded data via LoRa.
 package core
 
-// CHANGELOG (refactor v2):
-// - Removed parser dependency
-// - Vehicle<->Gateway uses CBOR serialization
-// - Context-based lifecycle management
-// - Structured logging (slog)
-// - Renamed methods to Start / Shutdown for consistency
-// - Safe Close and consistent log keys
-
 import (
 	"context"
 	"fmt"
@@ -19,7 +11,6 @@ import (
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -167,7 +158,7 @@ func (v *Vehicle) Start(ctx context.Context) error {
 					hello := model.HelloMessage{VehicleID: v.ID}
 					hb, _ := cbor.Marshal(hello)
 					_ = v.lora.WriteFrame(hb)
-					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.GatewayID)
+					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.Gateway)
 				case "auth":
 					// receive auth (key)
 					var a model.AuthMessage
@@ -251,27 +242,12 @@ func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
 		return
 	}
 	if v.lora != nil {
-		if v.sessionKey != nil {
-			frame, err := util.BuildFrame(payload)
-			if err != nil {
-				slog.Warn("build frame failed", "component", "vehicle", "id", v.ID, "error", err)
-				return
-			}
-			if err := v.lora.WriteBytes(frame); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
+		if err := v.lora.WriteFrame(payload); err != nil {
+			slog.Warn("failed to send telemetry",
+				"component", "vehicle", "id", v.ID, "error", err)
 		} else {
-			if err := v.lora.WriteFrame(payload); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
+			slog.Debug("telemetry sent",
+				"component", "vehicle", "id", v.ID)
 		}
 	}
 }

@@ -2,18 +2,9 @@
 // vehicles with the FogServer using CBOR (for LoRa) and JSON (for HTTP).
 package core
 
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; Vehicle<->Gateway uses CBOR serialization
-// - Gateway<->FogServer uses JSON over HTTP
-// - Context-based goroutine control and safe shutdown
-// - Structured logging using slog
-// - Renamed methods and variables to follow Go naming conventions
-// - Safe Close checks and improved lifecycle management
-
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -22,7 +13,6 @@ import (
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -30,11 +20,9 @@ import (
 // Gateway represents a LoRa gateway that decodes CBOR messages from vehicles,
 // re-encodes them as JSON, and forwards them to the FogServer.
 type Gateway struct {
-	ID         string
 	Addr       string
 	ServerAddr string
-	// vehicles   map[string]struct{}
-	keyStore   map[string][]byte // vehicleID -> session key
+	slotMap    map[int]string
 	lora       *device.Lora
 	server     *http.Server
 	stopCtx    context.Context
@@ -44,21 +32,13 @@ type Gateway struct {
 
 // NewGateway creates a new Gateway instance bound to a LoRa serial device.
 // func NewGateway(id, loraDev string, loraBaud int, addr, serverAddr string, vehicles []string) *Gateway {
-func NewGateway(id, loraDev string, loraBaud int, addr, serverAddr string) *Gateway {
+func NewGateway(loraDev string, loraBaud int, addr, serverAddr string) *Gateway {
 	lora := device.NewLora(loraDev, loraBaud)
 
-	// vmap := make(map[string]struct{}, len(vehicles))
-	// for _, v := range vehicles {
-	// 	vmap[v] = struct{}{}
-	// }
-
 	return &Gateway{
-		ID:         id,
 		lora:       lora,
 		Addr:       addr,
 		ServerAddr: serverAddr,
-		// vehicles:   vmap,
-		keyStore: make(map[string][]byte),
 	}
 }
 
@@ -68,7 +48,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 
 	if g.lora == nil {
 		slog.Warn("gateway running in headless mode (no serial device)",
-			"component", "gateway", "id", g.ID)
+			"component", "gateway", "addr", g.Addr)
 		return nil
 	}
 
@@ -77,7 +57,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go func() {
 		defer g.wg.Done()
 		beacon := model.BeaconMessage{
-			GatewayID: g.ID,
+			Gateway:   g.Addr,
 			Timestamp: time.Now().Unix(),
 			// Nonce:     uint32(time.Now().UnixNano() & 0xffffffff),
 		}
@@ -101,10 +81,10 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go func() {
 		defer g.wg.Done()
 		slog.Info("gateway HTTP server started",
-			"component", "gateway", "id", g.ID, "addr", addr)
+			"component", "gateway", "id", g.Addr, "addr", addr)
 		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("gateway HTTP server error",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}()
 
@@ -118,7 +98,7 @@ func (g *Gateway) runUplink() {
 	for {
 		select {
 		case <-g.stopCtx.Done():
-			slog.Info("uplink loop stopped", "component", "gateway", "id", g.ID)
+			slog.Info("uplink loop stopped", "component", "gateway", "id", g.Addr)
 			return
 		default:
 		}
@@ -139,69 +119,71 @@ func (g *Gateway) runUplink() {
 				if err := cbor.Unmarshal(frame, &hello); err == nil {
 					// call fog register API
 					registerBody := map[string]string{
-						"gateway_id": g.ID,
+						"gateway_id": g.Addr,
 						"vehicle_id": hello.VehicleID,
 					}
 					bodyB, _ := json.Marshal(registerBody)
 					resp, err := http.Post("http://"+g.ServerAddr+"/api/register", "application/json", bytes.NewReader(bodyB))
 					if err != nil {
-						slog.Warn("register request failed", "component", "gateway", "id", g.ID, "error", err)
+						slog.Warn("register request failed", "component", "gateway", "id", g.Addr, "error", err)
 						continue
 					}
+					if resp != nil && resp.Body != nil {
+						_ = resp.Body.Close()
+					}
 					var regResp struct {
-						VehicleID string `json:"vehicle_id"`
-						KeyHex    string `json:"key_hex"`
-						TTL       int64  `json:"ttl"`
+						VehicleID        string `json:"vehicle_id"`
+						TTL              int64  `json:"ttl"`
+						Slot             int    `json:"slot"` // CHANGED: server returns assigned slot
+						CycleStart       int64  `json:"cycle_start"`
+						CyclePeriod      int64  `json:"cycle_period_sec"`
+						SlotDurMs        int64  `json:"slot_duration_ms"`
+						GuardMs          int64  `json:"guard_ms"`
+						RegisterWindowMs int64  `json:"register_window_ms"`
 					}
 					_ = json.NewDecoder(resp.Body).Decode(&regResp)
 					_ = resp.Body.Close()
 
-					// decode key hex to bytes
-					// key, _ := hex.DecodeString(regResp.KeyHex)
-					if key, err := hex.DecodeString(regResp.KeyHex); err == nil {
-						g.keyStore[regResp.VehicleID] = key
+					// you probably want a proper slot map:
+					if g.slotMap == nil {
+						g.slotMap = make(map[int]string)
+					}
+					g.slotMap[regResp.Slot] = regResp.VehicleID
 
-						// create auth message and relay to vehicle
-						auth := model.AuthMessage{
-							VehicleID: regResp.VehicleID,
-							// Key:       key,
-							TTL: regResp.TTL,
-						}
-						if err := g.lora.SendAuthRelay(auth); err != nil {
-							slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID, "error", err)
-						} else {
-							slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID)
-						}
-						continue
+					// prepare auth relay (if key provided). CHANGED: Auth now contains slot/ttl
+					auth := model.AuthMessage{
+						Type:      "auth",
+						VehicleID: regResp.VehicleID,
+						TTL:       regResp.TTL,
+						Slot:      regResp.Slot,
+					}
+					if err := g.lora.SendAuthRelay(auth); err != nil {
+						slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.Addr, "vehicle", regResp.VehicleID, "error", err)
+					} else {
+						slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.Addr, "vehicle", regResp.VehicleID)
 					}
 				}
 			}
 		}
 
-		// Otherwise assume telemetry frame => forward to Fog as before
-		payload, err := util.ParseFrame(frame)
-		if err != nil {
-			slog.Warn("invalid frame", "component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
 		var telemetry model.VehicleData
-		if err := cbor.Unmarshal(payload, &telemetry); err != nil {
+		if err := cbor.Unmarshal(frame, &telemetry); err != nil {
 			slog.Warn("failed to decode CBOR telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 			continue
 		}
 		payloadJSON, _ := json.Marshal(telemetry)
 		resp, err := http.Post("http://"+g.ServerAddr+"/api/telemetry", "application/json", bytes.NewReader(payloadJSON))
 		if err != nil {
 			slog.Warn("failed to forward telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 			continue
 		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		slog.Info("uplink telemetry sent",
-			"component", "gateway", "id", g.ID, "vehicle", telemetry.VehicleID)
+			"component", "gateway", "id", g.Addr, "vehicle", telemetry.VehicleID)
 	}
 }
 
@@ -211,7 +193,7 @@ func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
 				slog.Warn("failed to close control request body",
-					"component", "gateway", "id", g.ID, "error", err)
+					"component", "gateway", "id", g.Addr, "error", err)
 			}
 		}
 	}()
@@ -231,18 +213,18 @@ func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
 	if err := g.lora.WriteFrame(b); err != nil {
 		http.Error(w, "failed to send control to vehicle", http.StatusInternalServerError)
 		slog.Error("failed to write control to LoRa device",
-			"component", "gateway", "id", g.ID, "error", err)
+			"component", "gateway", "id", g.Addr, "error", err)
 		return
 	}
 
 	slog.Info("control sent to vehicle",
-		"component", "gateway", "id", g.ID, "vehicle", control.VehicleID)
+		"component", "gateway", "id", g.Addr, "vehicle", control.VehicleID)
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // Shutdown gracefully stops the gateway and closes resources.
 func (g *Gateway) Shutdown() {
-	slog.Info("stopping gateway", "component", "gateway", "id", g.ID)
+	slog.Info("stopping gateway", "component", "gateway", "id", g.Addr)
 
 	if g.stopCancel != nil {
 		g.stopCancel()
@@ -253,17 +235,17 @@ func (g *Gateway) Shutdown() {
 		defer cancel()
 		if err := g.server.Shutdown(ctx); err != nil {
 			slog.Warn("gateway HTTP server shutdown error",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}
 
 	if g.lora != nil {
 		if err := g.lora.Close(); err != nil {
 			slog.Warn("failed to close device",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}
 
 	g.wg.Wait()
-	slog.Info("gateway stopped", "component", "gateway", "id", g.ID)
+	slog.Info("gateway stopped", "component", "gateway", "id", g.Addr)
 }

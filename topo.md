@@ -2,6 +2,22 @@
 title: Mô hình hệ thống
 ---
 
+## CƠ CHẾ TDMA & TRUYỀN NHẬN
+``## CƠ CHẾ TDMA & TRUYỀN NHẬN
+
+- vehicle sẽ có 3 trạng thái chờ (trống thông tin slot, gateway_id quản lý,...), chuẩn bị gửi và gửi (slot gửi, gateway_id quản lý,...), ở trạng thái chờ sẽ lắng nghe beacon từ gateway nếu nhận được beacon (chứa slot gửi, gateway_id gửi,...) sẽ gửi gói tin hello và chuyển sang trạng thái chuẩn bị gửi (chờ gói tin beacon tiếp theo để update thông tin slot, gateway_id quản lý ,...), sau khi nhận gói tin beacon tiếp theo sẽ chuyển sang trạng thái gửi, gửi telemetry theo beacon mà gateway gửi (update status slot, gateway_id quản lý,...), sau 1 khoảng thời gian không nhận được beacon sẽ về trạng thái chờ để lắng nghe beacon. Nếu đang còn thông tin cũ mà nhận được beacon từ gateway khác với gateway_id đang có thì cập nhật lại thông tin và gửi gói tin hello 
+
+- khi nhận được beacon, vehicle sẽ gửi lại hello chứa vehicleID cho gateway để gửi register cho server, server tạo sesion vehicle và gateway có ttl, tính toán slot cho tdma truyền nhận và post thông tin update beacon cho gateway để gateway cập nhật beacon broadcast, khi nhận được telemetry sẽ reset ttl này, sau 1 khoảng ttl mà không nhận được tin telemetry từ vehicle thì xóa session đó và gatewayID quản lý vehicle trong database (đặt giá trị rỗng hoặc null). Nếu 1 vehicle đã có 1 session (được quản lý bởi 1 gateway) mà lại có 1 gói tin đăng ký mới của vehicle đó đến server thì xóa thông tin session cũ, cập nhật lại thông tin cho gateway cũ, tạo session mới, update db và post thông tin cho gateway mới của vehicle 
+```
+| SYNC | SLOT1 | GUARD | SLOT2 | GUARD | ... | REGISTER_WINDOW |
+```
+
+- **SYNC:** Gateway phát gói đồng bộ thời gian.
+- **SLOTn:** mỗi thuyền gửi telemetry đúng slot của mình.
+- **GUARD:** 200–300 ms để bù lệch thời gian LoRa.
+- **REGISTER_WINDOW:** cuối chu kỳ dành cho thuyền mới đăng ký.
+
+
 ## 🎯 Mục tiêu của mô hình
 
 > Một nhóm xe tự hành (autonomous vehicles) **trao đổi dữ liệu với nhau

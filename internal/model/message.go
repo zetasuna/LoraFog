@@ -1,10 +1,6 @@
 // Package model provides message definitions exchanged across components.
 package model
 
-// CHANGELOG (refactor v2):
-// - Added json and cbor struct tags
-// - Minor naming cleanup for clarity
-
 // PacketType identifies packet category.
 type PacketType string
 
@@ -69,25 +65,40 @@ type GatewayRegistration struct {
 }
 
 // BeaconMessage is broadcasted by Gateway to Vehicle.
+// type BeaconMessage struct {
+// 	Type             string   `json:"type" cbor:"type"`
+// 	Gateway          string   `json:"gateway" cbor:"gateway"`
+// 	Timestamp        int64    `json:"timestamp" cbor:"timestamp"`                   // gateway local unix
+// 	CycleStart       int64    `json:"cycle_start" cbor:"cycle_start"`               // unix seconds for the cycle start (sync)
+// 	CyclePeriodSec   int64    `json:"cycle_period_sec" cbor:"cycle_period_sec"`     // total cycle length in seconds
+// 	SlotDurationMs   int64    `json:"slot_duration_ms" cbor:"slot_duration_ms"`     // slot length in ms
+// 	GuardMs          int64    `json:"guard_ms" cbor:"guard_ms"`                     // guard interval in ms
+// 	RegisterWindowMs int64    `json:"register_window_ms" cbor:"register_window_ms"` // register window at cycle end
+// 	SlotMap          map[string]int `json:"slot_map" cbor:"slot_map"`
+// }
+
+// BeaconMessage broadcast bởi Gateway đầu mỗi chu kỳ.
 type BeaconMessage struct {
-	// GatewayID short id (nên dùng string ngắn hoặc uint16)
-	Type      string `json:"type" cbor:"type"`
-	GatewayID string `json:"gateway_id" cbor:"gateway_id"`
-	Timestamp int64  `json:"timestamp" cbor:"timestamp"`
-	// Nonce     uint32 `json:"nonce" cbor:"nonce"` // 4-byte nonce
+	Type             string         `json:"type" cbor:"type"` // luôn là "beacon"
+	GatewayID        string         `json:"gateway_id" cbor:"gateway_id"`
+	Timestamp        int64          `json:"timestamp" cbor:"timestamp"`
+	CycleDurationMs  int64          `json:"cycle_dur_ms" cbor:"cycle_dur_ms"` // Tổng thời gian chu kỳ
+	SlotDurationMs   int64          `json:"slot_dur_ms" cbor:"slot_dur_ms"`   // Thời gian 1 slot
+	GuardTimeMs      int64          `json:"guard_ms" cbor:"guard_ms"`         // Thời gian nghỉ giữa các slot
+	RegisterWindowMs int64          `json:"reg_win_ms" cbor:"reg_win_ms"`     // Thời gian cuối cho đăng ký
+	SlotMap          map[string]int `json:"slot_map" cbor:"slot_map"`         // Map: VehicleID -> SlotIndex. Vehicle dựa vào đây để biết mình được gửi ở slot nào.
 }
 
 // HelloMessage is sent by Vehicle to Gateway when receive beacon message.
 type HelloMessage struct {
 	Type      string `json:"type" cbor:"type"`
 	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	// NonceReply uint32 `json:"nonce_reply" cbor:"nonce_reply"`
 }
 
 // AuthMessage (relay from Fog -> Gateway -> Vehicle) contains key and TTL.
 type AuthMessage struct {
 	Type      string `json:"type" cbor:"type"`
 	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	// Key       []byte `json:"key" cbor:"key"`
-	TTL int64 `json:"ttl" cbor:"ttl"` // seconds
+	TTL       int64  `json:"ttl" cbor:"ttl"` // seconds
+	Slot      int    `json:"slot" cbor:"slot"`
 }

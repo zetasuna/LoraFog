@@ -25,36 +25,34 @@ type Config struct {
 
 // ServerConfig configures the fog server and app forwarder.
 type ServerConfig struct {
-	FogAddr  string            `yaml:"fog_addr" json:"fog_addr" cbor:"fog_addr"`
-	AppAddr  string            `yaml:"app_addr" json:"app_addr" cbor:"app_addr"`
+	Addr     string            `yaml:"address" json:"address" cbor:"address"`
+	AppAddr  string            `yaml:"app_address" json:"app_address" cbor:"app_address"`
 	Gateways []GatewayRegistry `yaml:"gateway_registry" json:"gateway_registry" cbor:"gateway_registry"`
 }
 
 // GatewayRegistry is used to register gateways to the fog server on startup.
 type GatewayRegistry struct {
-	ID       string   `yaml:"id" json:"id" cbor:"id"`
-	URL      string   `yaml:"url" json:"url" cbor:"url"`
-	Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
+	ID   string `yaml:"id" json:"id" cbor:"id"`
+	Addr string `yaml:"address" json:"address" cbor:"address"`
+	// Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
 }
 
 // GatewayConfig config for a Gateway instance.
 type GatewayConfig struct {
-	ID       string   `yaml:"id" json:"id" cbor:"id"`
-	URL      string   `yaml:"url" json:"url" cbor:"url"`
-	FogURL   string   `yaml:"fog_url" json:"fog_url" cbor:"fog_url"`
-	LoraDev  string   `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
-	LoraBaud int      `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
-	Vehicles []string `yaml:"vehicles" json:"vehicles" cbor:"vehicles"`
+	ID         string `yaml:"id" json:"id" cbor:"id"`
+	Addr       string `yaml:"address" json:"address" cbor:"address"`
+	ServerAddr string `yaml:"server_address" json:"server_address" cbor:"server_address"`
+	LoraDev    string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
+	LoraBaud   int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
 }
 
 // VehicleConfig config for a Vehicle agent.
 type VehicleConfig struct {
-	ID                  string `yaml:"id" json:"id" cbor:"id"`
-	TelemetryIntervalMs int    `yaml:"telemetry_interval_ms" json:"telemetry_interval_ms" cbor:"telemetry_interval_ms"`
-	LoraDev             string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
-	LoraBaud            int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
-	ArduinoDev          string `yaml:"arduino_device" json:"arduino_device" cbor:"arduino_device"`
-	ArduinoBaud         int    `yaml:"arduino_baud" json:"arduino_baud" cbor:"arduino_baud"`
+	ID          string `yaml:"id" json:"id" cbor:"id"`
+	LoraDev     string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
+	LoraBaud    int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
+	ArduinoDev  string `yaml:"arduino_device" json:"arduino_device" cbor:"arduino_device"`
+	ArduinoBaud int    `yaml:"arduino_baud" json:"arduino_baud" cbor:"arduino_baud"`
 }
 
 // ArduinoConfig defines a serial Arduino connection.
@@ -75,16 +73,25 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config is nil")
 	}
-	if c.Server.FogAddr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
-		return errors.New("no fog address and no gateways/vehicles configured")
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no server configured")
+	}
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no gateways configured")
+	}
+	if c.Server.Addr == "" && len(c.Gateways) == 0 && len(c.Vehicles) == 0 {
+		return errors.New("no vehicles configured")
 	}
 	ids := map[string]struct{}{}
 	for i, gw := range c.Gateways {
 		if gw.ID == "" {
 			return fmt.Errorf("gateways[%d]: id is empty", i)
 		}
-		if gw.FogURL == "" {
-			return fmt.Errorf("gateways[%d]: fog_url is empty", i)
+		if gw.Addr == "" {
+			return fmt.Errorf("gateways[%d]: address is empty", i)
+		}
+		if gw.ServerAddr == "" {
+			return fmt.Errorf("gateways[%d]: server_address is empty", i)
 		}
 		if _, ok := ids[gw.ID]; ok {
 			return fmt.Errorf("duplicate id in gateways: %s", gw.ID)
@@ -120,10 +127,10 @@ const (
 )
 
 // Packet encapsulates a typed payload.
-type Packet struct {
-	Type PacketType `json:"type" cbor:"type"`
-	Data any        `json:"data" cbor:"data"`
-}
+// type Packet struct {
+// 	Type PacketType `json:"type" cbor:"type"`
+// 	Data any        `json:"data" cbor:"data"`
+// }
 
 // VehicleData represents telemetry reported by a vehicle.
 type VehicleData struct {
@@ -170,29 +177,36 @@ type ArduinoControl struct {
 // GatewayRegistration is used when registering gateways to the fog server.
 type GatewayRegistration struct {
 	GatewayID string   `json:"gateway_id" cbor:"gateway_id"`
-	URL       string   `json:"url" cbor:"url"`
+	Addr      string   `json:"address" cbor:"address"`
 	Vehicles  []string `json:"vehicles" cbor:"vehicles"`
 }
 
 // BeaconMessage is broadcasted by Gateway to Vehicle.
 type BeaconMessage struct {
-	// GatewayID short id (nên dùng string ngắn hoặc uint16)
-	GatewayID string `json:"gateway_id" cbor:"gateway_id"`
-	Timestamp int64  `json:"timestamp" cbor:"timestamp"`
-	// Nonce     uint32 `json:"nonce" cbor:"nonce"` // 4-byte nonce
+	Type             string   `json:"type" cbor:"type"`
+	Gateway          string   `json:"gateway" cbor:"gateway"`
+	Timestamp        int64    `json:"timestamp" cbor:"timestamp"`                   // gateway local unix
+	CycleStart       int64    `json:"cycle_start" cbor:"cycle_start"`               // unix seconds for the cycle start (sync)
+	CyclePeriodSec   int64    `json:"cycle_period_sec" cbor:"cycle_period_sec"`     // total cycle length in seconds
+	SlotDurationMs   int64    `json:"slot_duration_ms" cbor:"slot_duration_ms"`     // slot length in ms
+	GuardMs          int64    `json:"guard_ms" cbor:"guard_ms"`                     // guard interval in ms
+	RegisterWindowMs int64    `json:"register_window_ms" cbor:"register_window_ms"` // register window at cycle end
+	Slots            []string `json:"slots" cbor:"slots"`                           // index->vehicleID ("" for empty)
 }
 
 // HelloMessage is sent by Vehicle to Gateway when receive beacon message.
 type HelloMessage struct {
+	Type      string `json:"type" cbor:"type"`
 	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
 	// NonceReply uint32 `json:"nonce_reply" cbor:"nonce_reply"`
 }
 
 // AuthMessage (relay from Fog -> Gateway -> Vehicle) contains key and TTL.
 type AuthMessage struct {
+	Type      string `json:"type" cbor:"type"`
 	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	// Key       []byte `json:"key" cbor:"key"`
-	TTL int64 `json:"ttl" cbor:"ttl"` // seconds
+	TTL       int64  `json:"ttl" cbor:"ttl"` // seconds
+	Slot      int    `json:"slot" cbor:"slot"`
 }
 
 ```
@@ -355,188 +369,15 @@ func (m *SocatManager) CleanupAll() {
 
 ```
 
-- /internal/util/hmac.go
-```go
-package util
-
-import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"fmt"
-)
-
-// GenerateRandomKey returns n random bytes (use n=16 for AES-128 / HMAC key).
-func GenerateRandomKey(n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate random key: %w", err)
-	}
-	return b, nil
-}
-
-// ComputeHMAC computes HMAC-SHA256 and returns the first tagLen bytes.
-func ComputeHMAC(key, data []byte, tagLen int) []byte {
-	m := hmac.New(sha256.New, key)
-	_, _ = m.Write(data)
-	full := m.Sum(nil)
-	if tagLen <= 0 || tagLen > len(full) {
-		tagLen = len(full)
-	}
-	return full[:tagLen]
-}
-
-// VerifyHMAC compares truncated HMAC in constant time.
-func VerifyHMAC(key, data, tag []byte) bool {
-	expected := ComputeHMAC(key, data, len(tag))
-	return hmac.Equal(expected, tag)
-}
-
-```
-
-- /internal/util/packet.go
-```go
-// internal/util/packet.go
-// CHANGELOG:
-// - New helpers for building and verifying wire frames used on LoRa:
-//   Frame layout: [LEN(2)][NONCE(4)][HMAC(8)][PAYLOAD]
-// - Uses util.ComputeHMAC / VerifyHMAC for HMAC-SHA256 truncated
-
-package util
-
-import (
-	"crypto/rand"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-)
-
-// Frame constants
-const (
-	NonceLen  = 4
-	HMACLen   = 8
-	PrefixLen = 2 // LEN field (uint16)
-	HeaderLen = NonceLen + HMACLen
-	MinFrame  = PrefixLen + HeaderLen
-)
-
-// BuildFrame creates a simple frame [LEN(2)][PAYLOAD].
-func BuildFrame(payload []byte) ([]byte, error) {
-	if len(payload) == 0 {
-		return nil, errors.New("empty payload")
-	}
-	totalLen := PrefixLen + len(payload)
-	if totalLen > 0xFFFF {
-		return nil, fmt.Errorf("payload too large")
-	}
-
-	frame := make([]byte, totalLen)
-	binary.BigEndian.PutUint16(frame[0:PrefixLen], uint16(len(payload)))
-	copy(frame[PrefixLen:], payload)
-	return frame, nil
-}
-
-// ParseFrame strips the 2-byte prefix and returns only the payload.
-func ParseFrame(frame []byte) ([]byte, error) {
-	if len(frame) < PrefixLen {
-		return nil, errors.New("frame too short")
-	}
-	expectedLen := int(binary.BigEndian.Uint16(frame[:PrefixLen]))
-	if expectedLen != len(frame)-PrefixLen {
-		return nil, fmt.Errorf("length mismatch: got %d, expected %d", len(frame)-PrefixLen, expectedLen)
-	}
-	return frame[PrefixLen:], nil
-}
-
-// BuildFrameWithKey builds a wire frame from payload and a shared key.
-// Returns full frame including 2-byte length prefix.
-// Frame = [LEN:2][NONCE:4][HMAC:8][PAYLOAD]
-func BuildFrameWithKey(key []byte, payload []byte) ([]byte, error) {
-	if len(key) == 0 {
-		return nil, errors.New("empty key")
-	}
-	// generate 4-byte nonce
-	var nonce [NonceLen]byte
-	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
-		return nil, fmt.Errorf("generate nonce: %w", err)
-	}
-
-	// compute HMAC over (nonce || payload)
-	data := append(nonce[:], payload...)
-	tag := ComputeHMAC(key, data, HMACLen)
-
-	totalLen := PrefixLen + HeaderLen + len(payload)
-	if totalLen > 0xFFFF {
-		return nil, fmt.Errorf("payload too large")
-	}
-
-	frame := make([]byte, totalLen)
-	// write length (big endian) at [0:2]
-	binary.BigEndian.PutUint16(frame[0:PrefixLen], uint16(totalLen))
-	// write nonce
-	copy(frame[PrefixLen:PrefixLen+NonceLen], nonce[:])
-	// write tag
-	copy(frame[PrefixLen+NonceLen:PrefixLen+NonceLen+HMACLen], tag)
-	// write payload
-	copy(frame[PrefixLen+HeaderLen:], payload)
-
-	return frame, nil
-}
-
-// ParseAndVerifyFrameWithKey parses a raw frame (as returned by LoraDevice.ReadFrame())
-// and verifies HMAC using the provided key. If valid, returns payload and nonce.
-func ParseAndVerifyFrameWithKey(key []byte, frame []byte) (payload []byte, nonce []byte, err error) {
-	if len(frame) < HeaderLen {
-		return nil, nil, errors.New("frame too short")
-	}
-	// Expectation: caller may pass in payload portion (without LEN) or full frame with LEN.
-	// Accept both: if len(frame) >= MinFrame and the first two bytes look like length, strip prefix.
-	if len(frame) >= MinFrame {
-		// check whether first two bytes indicate the total length equals len(frame)
-		pref := binary.BigEndian.Uint16(frame[0:PrefixLen])
-		if int(pref) == len(frame) {
-			// strip length prefix
-			frame = frame[PrefixLen:]
-		}
-	}
-	// Now frame layout: [NONCE(4)][HMAC(8)][PAYLOAD]
-	if len(frame) < HeaderLen {
-		return nil, nil, errors.New("payload too short after stripping prefix")
-	}
-
-	nonce = make([]byte, NonceLen)
-	copy(nonce, frame[0:NonceLen])
-	tag := frame[NonceLen : NonceLen+HMACLen]
-	payload = make([]byte, len(frame)-HeaderLen)
-	copy(payload, frame[HeaderLen:])
-
-	// compute expected tag
-	data := append(nonce, payload...)
-	if !VerifyHMAC(key, data, tag) {
-		return nil, nil, errors.New("hmac verification failed")
-	}
-	return payload, nonce, nil
-}
-
-```
-
 - /internal/core/system.go
 ```go
-// Package core implements the orchestration and communication logic for the LoraFog edge system.
+// Package core orchestrates system startup and shutdown.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser layer and wire_format configuration
-// - Unified goroutine lifecycle via context.Context
-// - Introduced structured logging using log/slog
-// - Renamed symbols to follow Go naming conventions (Start, Shutdown, socatManager, etc.)
-// - Added nil-safe Close checks to suppress unchecked warnings
-// - Improved documentation and function clarity for maintainability
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -549,11 +390,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// System manages the lifecycle of FogServer, Gateways, Vehicles, and Arduino devices.
+// System manages Fog server, gateways, and vehicles.
 type System struct {
 	configPath   string
 	config       *model.Config
-	fogServer    *FogServer
+	server       *Server
 	gateways     []*Gateway
 	vehicles     []*Vehicle
 	arduinos     []*device.Arduino
@@ -563,313 +404,253 @@ type System struct {
 	wg     sync.WaitGroup
 }
 
-// NewSystem loads configuration from YAML and constructs the runtime components.
-func NewSystem(configPath string) (*System, error) {
-	data, err := os.ReadFile(configPath)
+// NewSystem constructs a System from YAML configuration.
+func NewSystem(path string) (*System, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-
 	var cfg model.Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
 
 	sys := &System{
-		configPath:   configPath,
+		configPath:   path,
 		config:       &cfg,
 		socatManager: util.NewSocatManager(),
 	}
 
-	// Initialize virtual serial pairs if configured.
-	for _, pair := range cfg.VirtualSerials {
-		if err := sys.socatManager.CreatePair(pair.Left, pair.Right); err != nil {
-			slog.Warn("failed to create virtual serial pair",
-				"left", pair.Left, "right", pair.Right, "error", err)
-		}
-	}
-	time.Sleep(2 * time.Second)
-
-	// Construct FogServer
-	if cfg.Server.FogAddr != "" {
-		sys.fogServer = NewFogServer(cfg.Server.FogAddr, cfg.Server.AppAddr)
-		for _, g := range cfg.Server.Gateways {
-			sys.fogServer.RegisterGateway(g.ID, g.URL, g.Vehicles)
-			slog.Info("registered gateway",
-				"component", "fog",
-				"id", g.ID,
-				"url", g.URL,
-				"vehicles", g.Vehicles)
-		}
-	}
-
-	// Construct Gateways
-	for _, gwCfg := range cfg.Gateways {
-		gw := NewGateway(
-			gwCfg.ID,
-			gwCfg.LoraDev,
-			gwCfg.LoraBaud,
-			gwCfg.URL,
-			gwCfg.FogURL,
-			gwCfg.Vehicles,
+	for _, vs := range cfg.VirtualSerials {
+		_ = sys.socatManager.CreatePair(
+			vs.Left,
+			vs.Right,
 		)
-		sys.gateways = append(sys.gateways, gw)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// 1. Mở kết nối DB ở đây (trong main)
+	db, err := sql.Open("mysql", "admin:admin@tcp(localhost:3006)/boat")
+	if err != nil {
+		slog.Error("failed to configure database", "error", err)
+		// os.Exit(1)
 	}
 
-	// Construct Vehicles
-	for _, vCfg := range cfg.Vehicles {
-		v := NewVehicle(
-			vCfg.ID,
-			vCfg.LoraDev,
-			vCfg.LoraBaud,
-			vCfg.ArduinoDev,
-			vCfg.ArduinoBaud,
-			time.Duration(vCfg.TelemetryIntervalMs)*time.Millisecond,
+	// 2. Ping DB để xác nhận kết nối
+	if err := db.Ping(); err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		// os.Exit(1)
+	}
+	slog.Info("Database connection established")
+	if cfg.Server.Addr != "" {
+		sys.server = NewServer(
+			cfg.Server.Addr,
+			cfg.Server.AppAddr,
+			db,
 		)
-		sys.vehicles = append(sys.vehicles, v)
 	}
-
-	// Construct Arduino simulators
-	for _, aCfg := range cfg.Arduinos {
-		sys.arduinos = append(sys.arduinos,
-			device.NewArduino(aCfg.Dev, aCfg.Baud))
+	for _, g := range cfg.Gateways {
+		sys.gateways = append(sys.gateways, NewGateway(
+			g.LoraDev,
+			g.LoraBaud,
+			g.Addr,
+			g.ServerAddr,
+		))
+	}
+	for _, v := range cfg.Vehicles {
+		sys.vehicles = append(sys.vehicles, NewVehicle(
+			v.ID,
+			v.LoraDev,
+			v.LoraBaud,
+			v.ArduinoDev,
+			v.ArduinoBaud,
+		))
+	}
+	for _, a := range cfg.Arduinos {
+		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Dev, a.Baud))
 	}
 
 	return sys, nil
 }
 
-// Start launches all active components under a shared context.
+// Start launches all system components.
 func (s *System) Start(ctx context.Context) error {
-	if s.fogServer == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
-		return errors.New("no components to start")
+	if s.server == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
+		return fmt.Errorf("no active components")
 	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	// Start FogServer
-	if s.fogServer != nil {
+	if s.server != nil {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			slog.Info("starting fog server",
-				"component", "fog", "addr", s.fogServer.Addr)
-			if err := s.fogServer.Start(ctx); err != nil {
-				slog.Error("fog server stopped with error",
-					"component", "fog", "error", err)
-			}
+			_ = s.server.Start(ctx)
 		}()
 	}
-
-	// Start Gateways
 	for _, gw := range s.gateways {
-		if err := gw.Start(ctx); err != nil {
-			slog.Warn("gateway start failed",
-				"component", "gateway", "id", gw.ID, "error", err)
-		} else {
-			slog.Info("gateway started",
-				"component", "gateway", "id", gw.ID)
-		}
+		_ = gw.Start(ctx)
 	}
-
-	// Start Vehicles
-	for _, v := range s.vehicles {
-		if err := v.Start(ctx); err != nil {
-			slog.Warn("vehicle start failed",
-				"component", "vehicle", "id", v.ID, "error", err)
-		} else {
-			slog.Info("vehicle started",
-				"component", "vehicle", "id", v.ID)
-		}
+	for _, vh := range s.vehicles {
+		_ = vh.Start(ctx)
 	}
-
-	// Start Arduino simulations
-	for _, a := range s.arduinos {
+	for _, ino := range s.arduinos {
 		s.wg.Add(1)
-		go func(a *device.Arduino) {
+		go func(ino *device.Arduino) {
 			defer s.wg.Done()
-			slog.Info("starting arduino simulation",
-				"component", "arduino", "device", a.Device)
 			stop := make(chan struct{})
 			go func() {
 				<-ctx.Done()
 				close(stop)
 			}()
-			if err := a.StartSimulation(stop); err != nil {
-				slog.Error("arduino simulation failed",
-					"component", "arduino", "device", a.Device, "error", err)
-			}
-		}(a)
+			_ = ino.StartSimulation(stop)
+		}(ino)
 	}
-
 	return nil
 }
 
-// Shutdown gracefully stops all components and cleans up resources.
+// Shutdown gracefully stops all components.
 func (s *System) Shutdown() {
+	slog.Info("system shutting down")
 	if s.cancel != nil {
-		slog.Info("initiating system shutdown", "component", "system")
 		s.cancel()
 	}
-
 	for _, gw := range s.gateways {
 		gw.Shutdown()
 	}
-	for _, v := range s.vehicles {
-		v.Shutdown()
+	for _, vh := range s.vehicles {
+		vh.Shutdown()
 	}
-	for _, a := range s.arduinos {
-		if a != nil {
-			if err := a.Close(); err != nil {
-				slog.Warn("failed to close arduino",
-					"component", "arduino", "device", a.Device, "error", err)
-			}
-		}
+	for _, ino := range s.arduinos {
+		_ = ino.Close()
 	}
-
+	if s.server != nil {
+		_ = s.server.Shutdown()
+	}
 	if s.socatManager != nil {
 		s.socatManager.Cleanup()
 	}
-
 	s.wg.Wait()
-	slog.Info("system shutdown complete", "component", "system")
+	slog.Info("shutdown complete")
 }
 
 ```
 
 - /internal/core/server.go
 ```go
-// Package core defines the FogServer, which bridges gateways and application layers
-// via HTTP and WebSocket communication.
+// Package core implements the Fog server — registry, WebSocket, telemetry & control APIs.
 package core
-
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; JSON only for external communication
-// - Context-based lifecycle management
-// - Structured logging via slog
-// - Renamed registry map to vehicleRegistry (sync.Map)
-// - Added safe Close checks to prevent unchecked warnings
-// - Improved documentation, naming, and consistency
 
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/gorilla/websocket"
 )
 
-// FogServer acts as a lightweight fog layer that receives telemetry from gateways,
-// broadcasts updates via WebSocket, and forwards control commands.
-type FogServer struct {
-	Addr            string
-	AppAddr         string
-	server          *http.Server
-	sessions        *sessionStore
-	vehicleRegistry sync.Map // vehicleID -> gatewayURL
+// Server is the lightweight Fog backend managing registry and telemetry.
+type Server struct {
+	Addr    string
+	AppAddr string
 
-	clientMu sync.Mutex
-	clients  map[*websocket.Conn]bool
+	server   *http.Server
+	database *sql.DB
+
+	// vehicleRegistry sync.Map // vehicleID -> gatewayURL
+
+	clients   map[*websocket.Conn]bool
+	clientMu  sync.Mutex
+	sessionMu sync.Mutex
+	sessions  map[string]*Session
 }
 
-// NewFogServer initializes a new FogServer with the given listening and app addresses.
-func NewFogServer(addr, appAddr string) *FogServer {
-	return &FogServer{
-		Addr:    addr,
-		AppAddr: appAddr,
-		clients: make(map[*websocket.Conn]bool),
+// Session stores temporary authentication for a vehicle.
+type Session struct {
+	VehicleID string
+	GatewayID string
+	CreatedAt time.Time
+	TTL       time.Duration
+	Slot      int
+}
+
+// NewServer creates a new Fog HTTP server.
+func NewServer(addr, appAddr string, db *sql.DB) *Server {
+	return &Server{
+		Addr:     addr,
+		AppAddr:  appAddr,
+		database: db,
+		clients:  make(map[*websocket.Conn]bool),
+		sessions: make(map[string]*Session),
 	}
 }
 
-// RegisterGateway associates a gateway with its managed vehicles.
-func (f *FogServer) RegisterGateway(gatewayID, url string, vehicles []string) {
-	for _, v := range vehicles {
-		f.vehicleRegistry.Store(v, url)
-	}
-	slog.Info("gateway registered",
-		"component", "fog",
-		"gateway", gatewayID,
-		"vehicles", vehicles)
-}
-
-// Start runs the HTTP server until the provided context is cancelled.
-func (f *FogServer) Start(ctx context.Context) error {
+// Start runs the HTTP server and session sweeper.
+func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/telemetry", f.handleTelemetry)
-	mux.HandleFunc("/api/register", f.handleRegister)
-	mux.HandleFunc("/api/control", f.handleControl)
-	mux.HandleFunc("/ws", f.handleWebSocket)
+	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
+	mux.HandleFunc("/api/register", s.handleRegister)
+	mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/api/gw/report", s.handleGatewayReport)
+	mux.HandleFunc("/ws", s.handleWebSocket)
 
-	addr := strings.TrimPrefix(strings.TrimPrefix(f.Addr, "http://"), "https://")
-	f.server = &http.Server{Addr: addr, Handler: mux}
+	addr := strings.TrimPrefix(strings.TrimPrefix(s.Addr, "http://"), "https://")
+	s.server = &http.Server{Addr: addr, Handler: mux}
 
-	f.sessions = newSessionStore()
-	go func() {
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				f.sessions.Sweep()
-			}
-		}
-	}()
-
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("fog server listening", "component", "fog", "addr", addr)
-		if err := f.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		slog.Info("fog server context cancelled", "component", "fog")
-		return f.Shutdown()
-	case err := <-errCh:
+	go s.sweeper(ctx)
+	slog.Info("Fog server started", "addr", addr)
+	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	return nil
 }
 
-// Shutdown gracefully stops the fog server.
-func (f *FogServer) Shutdown() error {
-	if f.server == nil {
+// Shutdown stops the HTTP server.
+func (s *Server) Shutdown() error {
+	if s.server == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
-	slog.Info("shutting down fog server", "component", "fog")
-	if err := f.server.Shutdown(ctx); err != nil {
-		slog.Error("fog server shutdown error", "component", "fog", "error", err)
-		return err
+	slog.Info("Stopping Fog server")
+	if s.database != nil {
+		if err := s.database.Close(); err != nil {
+			slog.Warn("failed to close database", "error", err)
+			// Bạn có thể chọn trả về lỗi này hoặc lỗi server
+		} else {
+			slog.Info("Database connection closed")
+		}
 	}
-	slog.Info("fog server stopped", "component", "fog")
-	return nil
+	return s.server.Shutdown(ctx)
 }
 
-// handleTelemetryRequest processes telemetry JSON and broadcasts it to WebSocket clients.
-func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
+// handleTelemetry accepts uplink telemetry and relays to app/websocket.
+func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close telemetry body", "error", err)
+				slog.Warn("failed to close telemetry request body",
+					"component", "server", "error", err)
 			}
 		}
 	}()
+
+	gatewayIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		slog.Warn("cannot parse gateway address", "remote", r.RemoteAddr, "err", err)
+		gatewayIP = r.RemoteAddr
+	}
+	slog.Debug("received uplink from gateway", "ip", gatewayIP) // var exists bool
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -883,17 +664,73 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate vehicle identity against DB: boat.boatID must match telemetry.VehicleID
+	if telemetry.VehicleID == "" {
+		// Reject telemetry without vehicle id — require GW to forward vehicle id
+		slog.Warn("telemetry without vehicle_id rejected", "from", gatewayIP)
+		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
+		return
+	}
+	boatDBID, gwID, err := s.lookupBoatByBoatID(telemetry.VehicleID)
+	if err != nil {
+		slog.Error("db error lookup boat", "vehicle", telemetry.VehicleID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if boatDBID == 0 {
+		// unknown boatID -> reject (possible spoofing)
+		slog.Warn("telemetry for unknown boatID dropped", "boatID", telemetry.VehicleID, "from", gatewayIP)
+		http.Error(w, "unknown vehicle", http.StatusNotFound)
+		return
+	}
+
+	// Optional: check that the gateway IP matches the registered gateway for this boat (if gwID present)
+	if gwID.Valid {
+		var gwIP string
+		if err := s.database.QueryRow("SELECT ip FROM gateway WHERE id = ?", gwID.Int64).Scan(&gwIP); err == nil {
+			if gwIP != gatewayIP {
+				slog.Warn("gateway IP mismatch for telemetry",
+					"vehicle", telemetry.VehicleID, "expected_gw_ip", gwIP, "from", gatewayIP)
+				// we still accept telemetry but log warning. If you want strict: reject here.
+				// http.Error(w, "gateway mismatch", http.StatusForbidden); return
+			}
+		}
+	}
+
+	// Refresh or create session (extend TTL)
+	s.sessionMu.Lock()
+	if ses, ok := s.sessions[telemetry.VehicleID]; ok {
+		ses.CreatedAt = time.Now()
+		// TTL unchanged
+	} else {
+		// create with default TTL (5min)
+		s.sessions[telemetry.VehicleID] = &Session{
+			VehicleID: telemetry.VehicleID,
+			GatewayID: gatewayIP,
+			CreatedAt: time.Now(),
+			TTL:       5 * time.Minute,
+		}
+	}
+	s.sessionMu.Unlock()
+
 	out, _ := json.Marshal(telemetry)
-	f.broadcast(string(out))
+	s.broadcast(string(out))
 
 	// Forward telemetry to App Server if configured
-	if f.AppAddr != "" {
+	if s.AppAddr != "" {
 		go func() {
-			resp, err := http.Post(f.AppAddr+"/api/telemetry",
-				"application/json", bytes.NewReader(out))
+			resp, err := http.Post(
+				s.AppAddr+"/api/telemetry",
+				"application/json",
+				bytes.NewReader(out),
+			)
 			if err != nil {
-				slog.Warn("failed to forward telemetry",
-					"component", "fog", "app", f.AppAddr, "error", err)
+				slog.Warn(
+					"failed to forward telemetry",
+					"component", "fog",
+					"app", s.AppAddr,
+					"error", err,
+				)
 				return
 			}
 			if resp != nil && resp.Body != nil {
@@ -901,135 +738,244 @@ func (f *FogServer) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleRegister accepts gateway->fog register requests and returns key+ttl.
-func (f *FogServer) handleRegister(w http.ResponseWriter, r *http.Request) {
-	defer func() { _ = r.Body.Close() }()
-	type reqT struct {
-		GatewayID string `json:"gateway_id"`
-		VehicleID string `json:"vehicle_id"`
-	}
-	var req reqT
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	// generate 16-byte key
-	key, err := util.GenerateRandomKey(16)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	ttl := int64(300) // 5 minutes lease; could be configurable
-
-	session := &Session{
-		VehicleID:   req.VehicleID,
-		GatewayID:   req.GatewayID,
-		Key:         key,
-		LeaseExpiry: time.Now().Add(time.Duration(ttl) * time.Second),
-		Seq:         0,
-	}
-	f.sessions.Set(req.VehicleID, session)
-
-	// respond with key hex and ttl
-	type respT struct {
-		VehicleID string `json:"vehicle_id"`
-		KeyHex    string `json:"key_hex"`
-		TTL       int64  `json:"ttl"`
-	}
-	resp := respT{
-		VehicleID: req.VehicleID,
-		KeyHex:    hex.EncodeToString(key),
-		TTL:       ttl,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-
-	slog.Info("registered vehicle session", "component", "fog", "vehicle", req.VehicleID, "gateway", req.GatewayID)
-}
-
-// handleControlRequest receives control JSON and forwards it to the responsible gateway.
-func (f *FogServer) handleControl(w http.ResponseWriter, r *http.Request) {
+// handleRegister registers a vehicle and returns session info.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
-				slog.Warn("failed to close control body", "error", err)
+				slog.Warn(
+					"failed to close register request body",
+					"component", "server",
+					"error", err,
+				)
 			}
 		}
 	}()
 
-	var control model.ControlData
-	if err := json.NewDecoder(r.Body).Decode(&control); err != nil {
+	var req struct {
+		GatewayID string `json:"gateway_id"`
+		VehicleID string `json:"vehicle_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-
-	val, ok := f.vehicleRegistry.Load(control.VehicleID)
-	if !ok {
-		http.Error(w, "no gateway registered for vehicle", http.StatusNotFound)
-		slog.Warn("control ignored: no gateway found",
-			"component", "fog", "vehicle", control.VehicleID)
+	if req.VehicleID == "" || req.GatewayID == "" {
+		http.Error(w, "gateway_id or vehicle_id missing", http.StatusBadRequest)
 		return
 	}
-	gatewayURL := val.(string)
 
-	payload, _ := json.Marshal(control)
+	// Find gateway DB id by its IP/address (gateway table must be populated)
+	var gwDBID int64
+	err := s.database.QueryRow("SELECT id FROM gateway WHERE ip = ?", req.GatewayID).Scan(&gwDBID)
+	if err == sql.ErrNoRows {
+		// If gateway not found, insert it (basic)
+		res, err := s.database.Exec("INSERT INTO gateway (name, ip) VALUES (?, ?)", req.GatewayID, req.GatewayID)
+		if err != nil {
+			slog.Error("db insert gateway failed", "gw", req.GatewayID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		gwDBID, _ = res.LastInsertId()
+	} else if err != nil {
+		slog.Error("db query gateway failed", "gw", req.GatewayID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Upsert boat row: if exists update gwID, else insert.
+	// MySQL-style upsert using UNIQUE constraint on boat.boatID assumed.
+	_, err = s.database.Exec(
+		"INSERT INTO boat (name, boatID, gwID) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE gwID = VALUES(gwID)",
+		req.VehicleID, req.VehicleID, gwDBID,
+	)
+	if err != nil {
+		slog.Error("db upsert boat failed", "vehicle", req.VehicleID, "gw_id", gwDBID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// create session for this vehicle
+	s.sessionMu.Lock()
+	slot := s.assignSlot(req.VehicleID)
+	s.sessions[req.VehicleID] = &Session{
+		VehicleID: req.VehicleID,
+		GatewayID: req.GatewayID,
+		CreatedAt: time.Now(),
+		TTL:       5 * time.Minute,
+		Slot:      slot,
+	}
+	s.sessionMu.Unlock()
+
+	resp := map[string]any{
+		"vehicle_id":         req.VehicleID,
+		"ttl":                300,
+		"slot":               slot,
+		"cycle_start":        time.Now().Unix(), // gateway may use this as immediate cycle start
+		"cycle_period_sec":   30,                // example: total cycle length (tune as needed)
+		"slot_duration_ms":   4000,              // slot length in ms (example)
+		"guard_ms":           300,
+		"register_window_ms": 3000,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("failed to encode register response", "error", err)
+	}
+	slog.Info(
+		"registered vehicle",
+		"vehicle", req.VehicleID,
+		"gateway", req.GatewayID,
+		"slot", slot,
+	)
+}
+
+// handleControl forwards control messages to the target gateway.
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close control request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var ctrl map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&ctrl); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	vehicleID, _ := ctrl["vehicle_id"].(string)
+	if vehicleID == "" {
+		http.Error(w, "vehicle_id missing", http.StatusBadRequest)
+		return
+	}
+
+	// Query gateway IP by joining boat -> gateway
+	var gatewayIP string
+	err := s.database.QueryRow(
+		`SELECT g.ip FROM gateway g 
+         JOIN boat b ON b.gwID = g.id
+         WHERE b.boatID = ?`, vehicleID,
+	).Scan(&gatewayIP)
+	if err == sql.ErrNoRows {
+		http.Error(w, "gateway not found for vehicle", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("db error lookup gateway", "vehicle", vehicleID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	payload, _ := json.Marshal(ctrl)
 	go func() {
-		resp, err := http.Post(gatewayURL+"/command",
+		resp, err := http.Post(gatewayIP+"/command",
 			"application/json", bytes.NewReader(payload))
 		if err != nil {
 			slog.Warn("failed to send control to gateway",
-				"component", "fog", "gateway", gatewayURL, "error", err)
+				"component", "fog", "gateway", gatewayIP, "error", err)
 			return
 		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		slog.Info("control forwarded",
-			"component", "fog", "vehicle", control.VehicleID, "gateway", gatewayURL)
+			"component", "fog", "vehicle", vehicleID, "gateway", gatewayIP)
 	}()
-
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleWebSocket upgrades an HTTP connection to WebSocket for live telemetry updates.
-func (f *FogServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+// handleWebSocket provides live telemetry streaming to dashboard clients.
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Warn("websocket upgrade failed", "component", "fog", "error", err)
 		return
 	}
-
-	f.clientMu.Lock()
-	f.clients[conn] = true
-	f.clientMu.Unlock()
+	s.clientMu.Lock()
+	s.clients[conn] = true
+	s.clientMu.Unlock()
 
 	go func() {
 		defer func() {
-			f.clientMu.Lock()
-			delete(f.clients, conn)
-			f.clientMu.Unlock()
+			s.clientMu.Lock()
+			delete(s.clients, conn)
+			s.clientMu.Unlock()
 			if err := conn.Close(); err != nil {
 				slog.Warn("failed to close websocket", "error", err)
 			}
 		}()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
-				break
+				return
 			}
 		}
 	}()
 }
 
-// broadcast sends a message to all connected WebSocket clients.
-func (f *FogServer) broadcast(msg string) {
-	f.clientMu.Lock()
-	defer f.clientMu.Unlock()
-	for conn := range f.clients {
+// handleGatewayReport logs periodic gateway reports.
+func (s *Server) handleGatewayReport(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r.Body != nil {
+			if err := r.Body.Close(); err != nil {
+				slog.Warn("failed to close report request body",
+					"component", "server", "error", err)
+			}
+		}
+	}()
+
+	var rep struct {
+		GWID      string `json:"gw_id"`
+		Region    string `json:"region"`
+		SlotUsage int    `json:"slotUsage"`
+		AvgDelay  int    `json:"avgDelay"`
+		Collision int    `json:"collision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	slog.Info("gateway report", "gw", rep.GWID, "usage", rep.SlotUsage, "delay", rep.AvgDelay, "coll", rep.Collision)
+	w.WriteHeader(http.StatusOK)
+}
+
+// sweeper cleans expired sessions.
+func (s *Server) sweeper(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := time.Now()
+			s.sessionMu.Lock()
+			var removed []string
+			for k, v := range s.sessions {
+				if now.Sub(v.CreatedAt) > v.TTL {
+					delete(s.sessions, k)
+					removed = append(removed, k)
+					slog.Info("session expired", "vehicle", k)
+				}
+			}
+			s.sessionMu.Unlock()
+			// Optionally: inform gateways that slots freed (could send to all registered gateways).
+			if len(removed) > 0 {
+				slog.Debug("freed slots for vehicles", "vehicles", removed)
+				// Implementation: iterate registered gateways and POST update; omitted here for brevity.
+			}
+		}
+	}
+}
+
+// broadcast sends message to all connected WebSocket clients.
+func (s *Server) broadcast(msg string) {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	for conn := range s.clients {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
 			slog.Warn("websocket send failed",
 				"component", "fog", "error", err)
@@ -1037,67 +983,46 @@ func (f *FogServer) broadcast(msg string) {
 	}
 }
 
-```
-
-- /internal/core/server_session.go
-```go
-package core
-
-import (
-	"log/slog"
-	"sync"
-	"time"
-)
-
-// Session represents a vehicle session on the fog server.
-type Session struct {
-	VehicleID   string
-	GatewayID   string
-	Key         []byte
-	LeaseExpiry time.Time
-	Seq         uint32
+// --- helper: check boat exists by boatID and get boat.id and gwID ---
+func (s *Server) lookupBoatByBoatID(boatID string) (boatDBID int64, gwID sql.NullInt64, err error) {
+	var id sql.NullInt64
+	var gw sql.NullInt64
+	// boat table: id, name, boatID, gwID
+	err = s.database.QueryRow("SELECT id, gwID FROM boat WHERE boatID = ?", boatID).Scan(&id, &gw)
+	if err == sql.ErrNoRows {
+		return 0, sql.NullInt64{}, nil // not found
+	}
+	if err != nil {
+		return 0, sql.NullInt64{}, err
+	}
+	return id.Int64, gw, nil
 }
 
-// sessionStore is a simple in-memory session storage with janitor.
-type sessionStore struct {
-	mu    sync.Mutex
-	store map[string]*Session // vehicleID -> session
-}
-
-func newSessionStore() *sessionStore {
-	return &sessionStore{store: make(map[string]*Session)}
-}
-
-func (s *sessionStore) Set(vehicle string, sess *Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.store[vehicle] = sess
-}
-
-func (s *sessionStore) Get(vehicle string) (*Session, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ss, ok := s.store[vehicle]
-	return ss, ok
-}
-
-func (s *sessionStore) Delete(vehicle string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.store, vehicle)
-}
-
-// Sweep removes expired sessions.
-func (s *sessionStore) Sweep() {
-	now := time.Now()
-	s.mu.Lock()
-	for id, ss := range s.store {
-		if now.After(ss.LeaseExpiry) {
-			delete(s.store, id)
-			slog.Info("session expired and removed", "component", "fog", "vehicle", id)
+// --- new helper: assignSlot
+// CHANGED: simple sequential slot allocator, reuses freed slots.
+// In production you may want more robust allocation (per gateway/region).
+func (s *Server) assignSlot(vehicleID string) int {
+	// naive: find first unused slot in [0, MaxSlots)
+	const MaxSlots = 64 // tune per your network
+	used := make([]bool, MaxSlots)
+	for _, ses := range s.sessions {
+		if ses != nil {
+			if ses.Slot >= 0 && ses.Slot < MaxSlots {
+				used[ses.Slot] = true
+			}
 		}
 	}
-	s.mu.Unlock()
+	// if already assigned, return existing
+	if ses, ok := s.sessions[vehicleID]; ok {
+		return ses.Slot
+	}
+	for i := range MaxSlots {
+		if !used[i] {
+			return i
+		}
+	}
+	// fallback: modulo hash
+	return int(time.Now().UnixNano() % MaxSlots)
 }
 
 ```
@@ -1125,31 +1050,28 @@ import (
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
 // Vehicle represents a single autonomous vehicle communicating via LoRa.
 type Vehicle struct {
-	ID            string
-	lora          *device.Lora
-	arduino       *device.Arduino
-	sessionKey    []byte
-	leaseExpiry   time.Time
-	telemetryRate time.Duration
+	ID          string
+	lora        *device.Lora
+	arduino     *device.Arduino
+	sessionKey  []byte
+	leaseExpiry time.Time
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 // NewVehicle constructs a Vehicle agent with LoRa and optional Arduino connection.
-func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud int, interval time.Duration) *Vehicle {
+func NewVehicle(id, loraDev string, loraBaud int, arduinoDev string, arduinoBaud int) *Vehicle {
 	lora := device.NewLora(loraDev, loraBaud)
 	v := &Vehicle{
-		ID:            id,
-		lora:          lora,
-		telemetryRate: interval,
+		ID:   id,
+		lora: lora,
 	}
 	if arduinoDev != "" {
 		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
@@ -1275,7 +1197,7 @@ func (v *Vehicle) Start(ctx context.Context) error {
 					hello := model.HelloMessage{VehicleID: v.ID}
 					hb, _ := cbor.Marshal(hello)
 					_ = v.lora.WriteFrame(hb)
-					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.GatewayID)
+					slog.Info("sent hello to gateway", "component", "vehicle", "id", v.ID, "gateway", b.Gateway)
 				case "auth":
 					// receive auth (key)
 					var a model.AuthMessage
@@ -1359,27 +1281,12 @@ func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
 		return
 	}
 	if v.lora != nil {
-		if v.sessionKey != nil {
-			frame, err := util.BuildFrame(payload)
-			if err != nil {
-				slog.Warn("build frame failed", "component", "vehicle", "id", v.ID, "error", err)
-				return
-			}
-			if err := v.lora.WriteBytes(frame); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
+		if err := v.lora.WriteFrame(payload); err != nil {
+			slog.Warn("failed to send telemetry",
+				"component", "vehicle", "id", v.ID, "error", err)
 		} else {
-			if err := v.lora.WriteFrame(payload); err != nil {
-				slog.Warn("failed to send telemetry",
-					"component", "vehicle", "id", v.ID, "error", err)
-			} else {
-				slog.Debug("telemetry sent",
-					"component", "vehicle", "id", v.ID)
-			}
+			slog.Debug("telemetry sent",
+				"component", "vehicle", "id", v.ID)
 		}
 	}
 }
@@ -1392,28 +1299,17 @@ func (v *Vehicle) sendTelemetry(a model.ArduinoData) {
 // vehicles with the FogServer using CBOR (for LoRa) and JSON (for HTTP).
 package core
 
-// CHANGELOG (refactor v2):
-// - Removed parser dependency; Vehicle<->Gateway uses CBOR serialization
-// - Gateway<->FogServer uses JSON over HTTP
-// - Context-based goroutine control and safe shutdown
-// - Structured logging using slog
-// - Renamed methods and variables to follow Go naming conventions
-// - Safe Close checks and improved lifecycle management
-
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/util"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -1421,11 +1317,9 @@ import (
 // Gateway represents a LoRa gateway that decodes CBOR messages from vehicles,
 // re-encodes them as JSON, and forwards them to the FogServer.
 type Gateway struct {
-	ID         string
-	URL        string
-	FogURL     string
-	vehicles   map[string]struct{}
-	keyStore   map[string][]byte // vehicleID -> session key
+	Addr       string
+	ServerAddr string
+	slotMap    map[int]string
 	lora       *device.Lora
 	server     *http.Server
 	stopCtx    context.Context
@@ -1434,21 +1328,14 @@ type Gateway struct {
 }
 
 // NewGateway creates a new Gateway instance bound to a LoRa serial device.
-func NewGateway(id, loraDev string, loraBaud int, url, fogURL string, vehicles []string) *Gateway {
+// func NewGateway(id, loraDev string, loraBaud int, addr, serverAddr string, vehicles []string) *Gateway {
+func NewGateway(loraDev string, loraBaud int, addr, serverAddr string) *Gateway {
 	lora := device.NewLora(loraDev, loraBaud)
 
-	vmap := make(map[string]struct{}, len(vehicles))
-	for _, v := range vehicles {
-		vmap[v] = struct{}{}
-	}
-
 	return &Gateway{
-		ID:       id,
-		lora:     lora,
-		URL:      url,
-		FogURL:   fogURL,
-		vehicles: vmap,
-		keyStore: make(map[string][]byte),
+		lora:       lora,
+		Addr:       addr,
+		ServerAddr: serverAddr,
 	}
 }
 
@@ -1458,7 +1345,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 
 	if g.lora == nil {
 		slog.Warn("gateway running in headless mode (no serial device)",
-			"component", "gateway", "id", g.ID)
+			"component", "gateway", "addr", g.Addr)
 		return nil
 	}
 
@@ -1467,7 +1354,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go func() {
 		defer g.wg.Done()
 		beacon := model.BeaconMessage{
-			GatewayID: g.ID,
+			Gateway:   g.Addr,
 			Timestamp: time.Now().Unix(),
 			// Nonce:     uint32(time.Now().UnixNano() & 0xffffffff),
 		}
@@ -1483,17 +1370,18 @@ func (g *Gateway) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/command", g.handleControlRequest)
 
-	addr := strings.TrimPrefix(strings.TrimPrefix(g.URL, "http://"), "https://")
+	// addr := strings.TrimPrefix(strings.TrimPrefix(g.URL, "http://"), "https://")
+	addr := g.Addr
 	g.server = &http.Server{Addr: addr, Handler: mux}
 
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
 		slog.Info("gateway HTTP server started",
-			"component", "gateway", "id", g.ID, "addr", addr)
+			"component", "gateway", "id", g.Addr, "addr", addr)
 		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("gateway HTTP server error",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}()
 
@@ -1507,7 +1395,7 @@ func (g *Gateway) runUplink() {
 	for {
 		select {
 		case <-g.stopCtx.Done():
-			slog.Info("uplink loop stopped", "component", "gateway", "id", g.ID)
+			slog.Info("uplink loop stopped", "component", "gateway", "id", g.Addr)
 			return
 		default:
 		}
@@ -1528,69 +1416,71 @@ func (g *Gateway) runUplink() {
 				if err := cbor.Unmarshal(frame, &hello); err == nil {
 					// call fog register API
 					registerBody := map[string]string{
-						"gateway_id": g.ID,
+						"gateway_id": g.Addr,
 						"vehicle_id": hello.VehicleID,
 					}
 					bodyB, _ := json.Marshal(registerBody)
-					resp, err := http.Post(g.FogURL+"/api/register", "application/json", bytes.NewReader(bodyB))
+					resp, err := http.Post("http://"+g.ServerAddr+"/api/register", "application/json", bytes.NewReader(bodyB))
 					if err != nil {
-						slog.Warn("register request failed", "component", "gateway", "id", g.ID, "error", err)
+						slog.Warn("register request failed", "component", "gateway", "id", g.Addr, "error", err)
 						continue
 					}
+					if resp != nil && resp.Body != nil {
+						_ = resp.Body.Close()
+					}
 					var regResp struct {
-						VehicleID string `json:"vehicle_id"`
-						KeyHex    string `json:"key_hex"`
-						TTL       int64  `json:"ttl"`
+						VehicleID        string `json:"vehicle_id"`
+						TTL              int64  `json:"ttl"`
+						Slot             int    `json:"slot"` // CHANGED: server returns assigned slot
+						CycleStart       int64  `json:"cycle_start"`
+						CyclePeriod      int64  `json:"cycle_period_sec"`
+						SlotDurMs        int64  `json:"slot_duration_ms"`
+						GuardMs          int64  `json:"guard_ms"`
+						RegisterWindowMs int64  `json:"register_window_ms"`
 					}
 					_ = json.NewDecoder(resp.Body).Decode(&regResp)
 					_ = resp.Body.Close()
 
-					// decode key hex to bytes
-					// key, _ := hex.DecodeString(regResp.KeyHex)
-					if key, err := hex.DecodeString(regResp.KeyHex); err == nil {
-						g.keyStore[regResp.VehicleID] = key
+					// you probably want a proper slot map:
+					if g.slotMap == nil {
+						g.slotMap = make(map[int]string)
+					}
+					g.slotMap[regResp.Slot] = regResp.VehicleID
 
-						// create auth message and relay to vehicle
-						auth := model.AuthMessage{
-							VehicleID: regResp.VehicleID,
-							// Key:       key,
-							TTL: regResp.TTL,
-						}
-						if err := g.lora.SendAuthRelay(auth); err != nil {
-							slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID, "error", err)
-						} else {
-							slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.ID, "vehicle", hello.VehicleID)
-						}
-						continue
+					// prepare auth relay (if key provided). CHANGED: Auth now contains slot/ttl
+					auth := model.AuthMessage{
+						Type:      "auth",
+						VehicleID: regResp.VehicleID,
+						TTL:       regResp.TTL,
+						Slot:      regResp.Slot,
+					}
+					if err := g.lora.SendAuthRelay(auth); err != nil {
+						slog.Warn("send auth to vehicle failed", "component", "gateway", "id", g.Addr, "vehicle", regResp.VehicleID, "error", err)
+					} else {
+						slog.Info("auth relayed to vehicle", "component", "gateway", "id", g.Addr, "vehicle", regResp.VehicleID)
 					}
 				}
 			}
 		}
 
-		// Otherwise assume telemetry frame => forward to Fog as before
-		payload, err := util.ParseFrame(frame)
-		if err != nil {
-			slog.Warn("invalid frame", "component", "gateway", "id", g.ID, "error", err)
-			continue
-		}
 		var telemetry model.VehicleData
-		if err := cbor.Unmarshal(payload, &telemetry); err != nil {
+		if err := cbor.Unmarshal(frame, &telemetry); err != nil {
 			slog.Warn("failed to decode CBOR telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 			continue
 		}
 		payloadJSON, _ := json.Marshal(telemetry)
-		resp, err := http.Post(g.FogURL+"/api/telemetry", "application/json", bytes.NewReader(payloadJSON))
+		resp, err := http.Post("http://"+g.ServerAddr+"/api/telemetry", "application/json", bytes.NewReader(payloadJSON))
 		if err != nil {
 			slog.Warn("failed to forward telemetry",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 			continue
 		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		slog.Info("uplink telemetry sent",
-			"component", "gateway", "id", g.ID, "vehicle", telemetry.VehicleID)
+			"component", "gateway", "id", g.Addr, "vehicle", telemetry.VehicleID)
 	}
 }
 
@@ -1600,7 +1490,7 @@ func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			if err := r.Body.Close(); err != nil {
 				slog.Warn("failed to close control request body",
-					"component", "gateway", "id", g.ID, "error", err)
+					"component", "gateway", "id", g.Addr, "error", err)
 			}
 		}
 	}()
@@ -1620,18 +1510,18 @@ func (g *Gateway) handleControlRequest(w http.ResponseWriter, r *http.Request) {
 	if err := g.lora.WriteFrame(b); err != nil {
 		http.Error(w, "failed to send control to vehicle", http.StatusInternalServerError)
 		slog.Error("failed to write control to LoRa device",
-			"component", "gateway", "id", g.ID, "error", err)
+			"component", "gateway", "id", g.Addr, "error", err)
 		return
 	}
 
 	slog.Info("control sent to vehicle",
-		"component", "gateway", "id", g.ID, "vehicle", control.VehicleID)
+		"component", "gateway", "id", g.Addr, "vehicle", control.VehicleID)
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // Shutdown gracefully stops the gateway and closes resources.
 func (g *Gateway) Shutdown() {
-	slog.Info("stopping gateway", "component", "gateway", "id", g.ID)
+	slog.Info("stopping gateway", "component", "gateway", "id", g.Addr)
 
 	if g.stopCancel != nil {
 		g.stopCancel()
@@ -1642,155 +1532,19 @@ func (g *Gateway) Shutdown() {
 		defer cancel()
 		if err := g.server.Shutdown(ctx); err != nil {
 			slog.Warn("gateway HTTP server shutdown error",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}
 
 	if g.lora != nil {
 		if err := g.lora.Close(); err != nil {
 			slog.Warn("failed to close device",
-				"component", "gateway", "id", g.ID, "error", err)
+				"component", "gateway", "id", g.Addr, "error", err)
 		}
 	}
 
 	g.wg.Wait()
-	slog.Info("gateway stopped", "component", "gateway", "id", g.ID)
-}
-
-```
-
-- /internal/device/serial.go
-```go
-// Package device implements a simple wrapper for serial communication.
-// It provides non-blocking read/write methods with optional timeout.
-package device
-
-// CHANGELOG (refactor v2):
-// - Safe read/write with timeout
-// - Added context support via external control
-// - Structured logging (slog)
-// - Safe Close() checks and standardized naming
-
-import (
-	"bufio"
-	"errors"
-	"fmt"
-	"io"
-	"log/slog"
-	"sync"
-	"time"
-
-	"go.bug.st/serial"
-)
-
-// Serial represents a simple serial port connection.
-type Serial struct {
-	Port     serial.Port
-	Path     string
-	BaudRate int
-	mu       sync.Mutex
-	reader   *bufio.Reader
-}
-
-// NewSerial opens a serial port with the given path and baud rate.
-func NewSerial(path string, baud int) (*Serial, error) {
-	mode := &serial.Mode{BaudRate: baud}
-	port, err := serial.Open(path, mode)
-	if err != nil {
-		return nil, fmt.Errorf("open serial port %s: %w", path, err)
-	}
-	s := &Serial{
-		Port:     port,
-		Path:     path,
-		BaudRate: baud,
-		reader:   bufio.NewReader(port),
-	}
-	slog.Info("serial port opened",
-		"component", "serial", "path", path, "baud", baud)
-	return s, nil
-}
-
-// ReadLine reads a line of data with an optional timeout (in milliseconds).
-func (s *Serial) ReadLine(timeoutMs int) (string, error) {
-	if s.Port == nil {
-		return "", errors.New("serial port not initialized")
-	}
-
-	if timeoutMs > 0 {
-		if err := s.Port.SetReadTimeout(time.Duration(timeoutMs) * time.Millisecond); err != nil {
-			slog.Warn("failed to set read timeout",
-				"component", "serial", "path", s.Path, "error", err)
-		}
-	}
-
-	line, err := s.reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return line, nil
-}
-
-// WriteLine writes a single line (with newline terminator) to the serial port.
-func (s *Serial) WriteLine(data string) error {
-	if s.Port == nil {
-		return errors.New("serial port not initialized")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, err := s.Port.Write([]byte(data + "\n")); err != nil {
-		slog.Warn("failed to write to serial",
-			"component", "serial", "path", s.Path, "error", err)
-		return err
-	}
-	return nil
-}
-
-// ReadBytes reads exactly n bytes from the serial port.
-// It blocks until all bytes are received or an error occurs.
-func (s *Serial) ReadBytes(n int) ([]byte, error) {
-	if s.Port == nil {
-		return nil, errors.New("serial port not initialized")
-	}
-	buf := make([]byte, n)
-	total := 0
-	for total < n {
-		readCount, err := io.ReadFull(s.reader, buf[total:])
-		total += readCount
-		if err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-// WriteBytes writes raw binary data to the serial port without newline.
-func (s *Serial) WriteBytes(b []byte) error {
-	if s.Port == nil {
-		return errors.New("serial port not initialized")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.Port.Write(b); err != nil {
-		slog.Warn("failed to write bytes to serial",
-			"component", "serial", "path", s.Path, "error", err)
-		return err
-	}
-	return nil
-}
-
-// Close closes the serial port safely.
-func (s *Serial) Close() error {
-	if s.Port == nil {
-		return nil
-	}
-	if err := s.Port.Close(); err != nil {
-		slog.Warn("failed to close serial port",
-			"component", "serial", "path", s.Path, "error", err)
-		return err
-	}
-	slog.Info("serial port closed", "component", "serial", "path", s.Path)
-	return nil
+	slog.Info("gateway stopped", "component", "gateway", "id", g.Addr)
 }
 
 ```
@@ -2078,6 +1832,142 @@ func (l *Lora) SendAuthRelay(auth any) error {
 		return err
 	}
 	return l.WriteFrame(b)
+}
+
+```
+
+- /internal/device/serial.go
+```go
+// Package device implements a simple wrapper for serial communication.
+// It provides non-blocking read/write methods with optional timeout.
+package device
+
+// CHANGELOG (refactor v2):
+// - Safe read/write with timeout
+// - Added context support via external control
+// - Structured logging (slog)
+// - Safe Close() checks and standardized naming
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"sync"
+	"time"
+
+	"go.bug.st/serial"
+)
+
+// Serial represents a simple serial port connection.
+type Serial struct {
+	Port     serial.Port
+	Path     string
+	BaudRate int
+	mu       sync.Mutex
+	reader   *bufio.Reader
+}
+
+// NewSerial opens a serial port with the given path and baud rate.
+func NewSerial(path string, baud int) (*Serial, error) {
+	mode := &serial.Mode{BaudRate: baud}
+	port, err := serial.Open(path, mode)
+	if err != nil {
+		return nil, fmt.Errorf("open serial port %s: %w", path, err)
+	}
+	s := &Serial{
+		Port:     port,
+		Path:     path,
+		BaudRate: baud,
+		reader:   bufio.NewReader(port),
+	}
+	slog.Info("serial port opened",
+		"component", "serial", "path", path, "baud", baud)
+	return s, nil
+}
+
+// ReadLine reads a line of data with an optional timeout (in milliseconds).
+func (s *Serial) ReadLine(timeoutMs int) (string, error) {
+	if s.Port == nil {
+		return "", errors.New("serial port not initialized")
+	}
+
+	if timeoutMs > 0 {
+		if err := s.Port.SetReadTimeout(time.Duration(timeoutMs) * time.Millisecond); err != nil {
+			slog.Warn("failed to set read timeout",
+				"component", "serial", "path", s.Path, "error", err)
+		}
+	}
+
+	line, err := s.reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return line, nil
+}
+
+// WriteLine writes a single line (with newline terminator) to the serial port.
+func (s *Serial) WriteLine(data string) error {
+	if s.Port == nil {
+		return errors.New("serial port not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.Port.Write([]byte(data + "\n")); err != nil {
+		slog.Warn("failed to write to serial",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
+	}
+	return nil
+}
+
+// ReadBytes reads exactly n bytes from the serial port.
+// It blocks until all bytes are received or an error occurs.
+func (s *Serial) ReadBytes(n int) ([]byte, error) {
+	if s.Port == nil {
+		return nil, errors.New("serial port not initialized")
+	}
+	buf := make([]byte, n)
+	total := 0
+	for total < n {
+		readCount, err := io.ReadFull(s.reader, buf[total:])
+		total += readCount
+		if err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+// WriteBytes writes raw binary data to the serial port without newline.
+func (s *Serial) WriteBytes(b []byte) error {
+	if s.Port == nil {
+		return errors.New("serial port not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.Port.Write(b); err != nil {
+		slog.Warn("failed to write bytes to serial",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
+	}
+	return nil
+}
+
+// Close closes the serial port safely.
+func (s *Serial) Close() error {
+	if s.Port == nil {
+		return nil
+	}
+	if err := s.Port.Close(); err != nil {
+		slog.Warn("failed to close serial port",
+			"component", "serial", "path", s.Path, "error", err)
+		return err
+	}
+	slog.Info("serial port closed", "component", "serial", "path", s.Path)
+	return nil
 }
 
 ```
