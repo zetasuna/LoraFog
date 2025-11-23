@@ -21,10 +21,10 @@ import (
 
 const (
 	// Thông số TDMA cố định
-	CycleDuration    = 2000 * time.Millisecond
-	SlotDurationMs   = int64(50)
-	GuardTimeMs      = int64(10)
-	RegisterWindowMs = int64(300)
+	CycleDuration    = 10000 * time.Millisecond
+	SlotDurationMs   = int64(2000)
+	GuardTimeMs      = int64(500)
+	RegisterWindowMs = int64(5000)
 )
 
 // Gateway là đại diện cho thiết bị Gateway LoRaWAN

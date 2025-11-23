@@ -5,37 +5,38 @@ server:
 gateways:
   - address: "127.0.0.1:10001"
     server_address: "127.0.0.1:10000"
-    lora_device: "/tmp/ttyGW1"
+    # lora_device: "/tmp/ttyGW1"
+    lora_device: "/dev/lora1"
     lora_baud: 9600
-  - address: "127.0.0.1:10002"
-    server_address: "127.0.0.1:10000"
-    lora_device: "/tmp/ttyGW2"
-    lora_baud: 9600
-
-vehicles:
-  - id: "VH01"
-    lora_device: "/tmp/ttyVH1"
-    lora_baud: 9600
-    arduino_device: "/tmp/ttyADR1"
-    arduino_baud: 9600
-  - id: "VH02"
-    lora_device: "/tmp/ttyVH2"
-    lora_baud: 9600
-    arduino_device: "/tmp/ttyADR2"
-    arduino_baud: 9600
-
-arduinos:
-  - device: "/tmp/ttyADS1"
-    baud: 9600
-  - device: "/tmp/ttyADS2"
-    baud: 9600
-
-virtual_serials:
-  - left: "/tmp/ttyGW1"
-    right: "/tmp/ttyVH1"
-  - left: "/tmp/ttyADS1"
-    right: "/tmp/ttyADR1"
-  - left: "/tmp/ttyGW2"
-    right: "/tmp/ttyVH2"
-  - left: "/tmp/ttyADS2"
-    right: "/tmp/ttyADR2"
+#   - address: "127.0.0.1:10002"
+#     server_address: "127.0.0.1:10000"
+#     lora_device: "/tmp/ttyGW2"
+#     lora_baud: 9600
+#
+# vehicles:
+#   - id: "VH01"
+#     lora_device: "/tmp/ttyVH1"
+#     lora_baud: 9600
+#     arduino_device: "/tmp/ttyADR1"
+#     arduino_baud: 9600
+#   - id: "VH02"
+#     lora_device: "/tmp/ttyVH2"
+#     lora_baud: 9600
+#     arduino_device: "/tmp/ttyADR2"
+#     arduino_baud: 9600
+#
+# arduinos:
+#   - device: "/tmp/ttyADS1"
+#     baud: 9600
+#   - device: "/tmp/ttyADS2"
+#     baud: 9600
+#
+# virtual_serials:
+#   - left: "/tmp/ttyGW1"
+#     right: "/tmp/ttyVH1"
+#   - left: "/tmp/ttyADS1"
+#     right: "/tmp/ttyADR1"
+#   - left: "/tmp/ttyGW2"
+#     right: "/tmp/ttyVH2"
+#   - left: "/tmp/ttyADS2"
+#     right: "/tmp/ttyADR2"
