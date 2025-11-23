@@ -1,11 +1,11 @@
 // Package core implements the Vehicle agent
+// responsible for collecting telemetry from Arduino devices
+// and sending CBOR-encoded data via LoRa.
 package core
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -59,7 +59,7 @@ func NewVehicle(
 		lora:         lora,
 		state:        StateIdle,
 		assignedSlot: -1,
-		estOWDms:     150, // default initial estimate (ms)
+		estOWDms:     150,
 	}
 	if arduinoDev != "" {
 		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
@@ -140,11 +140,11 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 			v.mu.Lock()
 			v.lastTelemetry = data
 			v.mu.Unlock()
-			// slog.Info("Vehicle received arduino data",
-			// 	"vehicle", v.ID,
-			// 	"lat", data.Latitude,
-			// 	"lon", data.Longitude,
-			// )
+			slog.Info("Vehicle received arduino data",
+				"vehicle", v.ID,
+				"lat", data.Latitude,
+				"lon", data.Longitude,
+			)
 		}
 	}
 }
@@ -166,6 +166,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 			frame, err := v.lora.Read(beaconTimeout)
 			if err != nil {
 				// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
+				// timeout handling
 				if err == device.ErrLoraTimeout {
 					// if we had a previous beacon and too long passed -> reset
 					if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
@@ -218,20 +219,6 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 					continue
 				}
 				slog.Info("Received control", "vehicle", v.ID)
-				arduinoControl := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
-					control.Speed,
-					control.Latitude,
-					control.Longitude,
-					control.Kp,
-					control.Ki,
-					control.Kd,
-				)
-				// Forward control data to Arduino
-				if err := v.arduino.Write(arduinoControl); err != nil {
-					slog.Error("Failed to forward control to Arduino", "vehicle", v.ID, "error", err)
-				} else {
-					slog.Info("Forwarded control to Arduino", "vehicle", v.ID)
-				}
 			default:
 				slog.Debug("Received unhandled message type", "type", msgType)
 			}
@@ -267,17 +254,29 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 	case StateIdle:
 		slog.Info("Received Beacon (Idle), preparing to send Hello", "gw", b.GatewayAddress)
 
-		// use sleepUntilRegisterWindow to compensate timing
-		if ok := v.sleepUntilRegisterWindow(ctx, b); !ok {
-			return
-		}
+		// Tính thời gian đợi đến Register Window
+		cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
+		regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
+		regStartOffset := cycleDuration - regWindow
 
-		// Re-check: maybe beacon or another goroutine assigned slot
-		if v.assignedSlot != -1 {
-			// already have slot -> go to sending
-			v.state = StateSending
-			slog.Info("Already assigned slot while waiting, state -> SENDING", "vehicle", v.ID, "slot", v.assignedSlot)
+		// Thời gian ngủ: Bằng độ dài chu kỳ - thời điểm bắt đầu Register Window + delay ngẫu nhiên nhỏ
+		// Ví dụ: Chu kỳ 2000ms, Register Window 300ms. regStartOffset = 1700ms.
+		// Time to sleep = 1700ms + (0-150ms)
+		// timeToSleep := regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond
+		// time.Sleep(timeToSleep)
+		// Calculate actual offset between local time and beacon timestamp (ms)
+		now := time.Now().UnixNano() / int64(time.Millisecond)
+		delta := now - b.CycleStart
+		// time until regStart since now = regStartOffset - delta
+		sleep := regStartOffset - time.Duration(delta)*time.Millisecond
+		if sleep < 0 {
+			// if we are already in/after reg window, send soon (small random backoff)
+			sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
+		}
+		select {
+		case <-ctx.Done():
 			return
+		case <-time.After(sleep):
 		}
 
 		// Gửi Hello
@@ -292,7 +291,6 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			v.state = StateJoining
 			slog.Info("Sent Hello, state -> JOINING", "id", v.ID)
 		}
-
 	case StateJoining:
 		// Trạng thái CHUẨN BỊ GỬI: Kiểm tra xem trong Beacon mới có Slot cho mình chưa
 		if slot, ok := b.SlotMap[v.ID]; ok {
@@ -300,26 +298,32 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			v.state = StateSending
 			slog.Info("Joined successfully state -> SENDING", "vehicle", v.ID, "slot", slot)
 			// Sau khi nhận beacon (T0), thực hiện TDMA gửi ngay trong chu kỳ này
-			go v.performTDMA(ctx, b)
+			v.performTDMA(b)
 		} else {
 			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
 			slog.Warn("Waiting for slot assignment...", "id", v.ID)
 
-			// use sleepUntilRegisterWindow for retry
-			if ok := v.sleepUntilRegisterWindow(ctx, b); !ok {
+			cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
+			regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
+			regStartOffset := cycleDuration - regWindow
+			// regStartOffset := cycleDuration - time.Duration(b.RegisterWindowMs)*time.Millisecond
+
+			// Ngủ đến Register Window tiếp theo
+			// time.Sleep(regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond)
+
+			now := time.Now().UnixNano() / int64(time.Millisecond)
+			delta := now - b.CycleStart
+			sleep := regStartOffset - time.Duration(delta)*time.Millisecond
+			if sleep < 0 {
+				sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
+			}
+			select {
+			case <-ctx.Done():
 				return
+			case <-time.After(sleep):
 			}
 
-			// Re-check prior to sending
-			if v.assignedSlot != -1 {
-				slog.Info("Slot assigned during wait, skip resend", "vehicle", v.ID, "slot", v.assignedSlot)
-				v.state = StateSending
-				// start TDMA for this cycle if possible
-				go v.performTDMA(ctx, b)
-				return
-			}
-
-			msg := model.HelloMessage{Type: model.PacketHello, VehicleID: v.ID}
+			msg := model.HelloMessage{Type: "hello", VehicleID: v.ID}
 			payload, _ := cbor.Marshal(msg)
 			if err := v.lora.Write(payload); err != nil {
 				slog.Warn("Failed to write Hello (retry)", "err", err)
@@ -333,7 +337,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		// Trạng thái GỬI: Kiểm tra lại SlotMap xem còn được cấp phép không
 		if slot, ok := b.SlotMap[v.ID]; ok {
 			v.assignedSlot = slot // Cập nhật slot nếu Gateway thay đổi
-			go v.performTDMA(ctx, b)
+			v.performTDMA(b)
 		} else {
 			slog.Warn("Lost slot allocation, returning to IDLE", "id", v.ID)
 			v.state = StateIdle
@@ -342,27 +346,31 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 	}
 }
 
-// performTDMA now accepts ctx and uses sleepUntilSlot to schedule transmission
-func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage) {
-	if v.assignedSlot < 1 {
-		slog.Warn("Invalid slot, skipping TDMA", "vehicle", v.ID, "slot", v.assignedSlot)
+// performTDMA tính toán thời gian ngủ và gửi Telemetry đúng Slot
+func (v *Vehicle) performTDMA(b model.BeaconMessage) {
+	// Tính toán thời điểm gửi: (SlotIndex-1) * (SlotDur + Guard)
+	// SlotIndex 1: (1-1)*... = 0ms. Gửi ngay. (Đây là cách tính đơn giản)
+	// SlotIndex n: (n-1) * (SlotDur + Guard)
+
+	slotIndex := max(0, v.assignedSlot-1)
+	oneSlot := time.Duration(b.SlotDurationMs)*time.Millisecond + time.Duration(b.GuardTimeMs)*time.Millisecond
+	slotTimeFromStart := time.Duration(slotIndex) * oneSlot
+
+	// Calculate delta between now and beacon timestamp
+	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+	deltaMs := nowMs - b.CycleStart
+	sleep := slotTimeFromStart - time.Duration(deltaMs)*time.Millisecond
+	if sleep < 0 {
+		// if we missed slot, do not block; wait next cycle
+		slog.Debug(
+			"Missed slot timing, skipping this cycle",
+			"vehicle", v.ID, "slot", v.assignedSlot)
 		return
 	}
 
-	// compute 0-based index
-	slotIndex := v.assignedSlot - 1
-
-	// Wait until the slot (potentially current or next cycle)
-	if ok := v.sleepUntilSlot(ctx, b, slotIndex); !ok {
-		// skip if context canceled or timing not possible
-		return
-	}
-
-	// Re-check assigned slot hasn't changed
-	if v.assignedSlot-1 != slotIndex {
-		slog.Info("Assigned slot changed before transmit, skipping", "vehicle", v.ID, "slotIndex", slotIndex, "currentSlot", v.assignedSlot)
-		return
-	}
+	// Ngủ đến đúng slot
+	// time.Sleep(slotTimeFromStart)
+	time.Sleep(sleep)
 
 	// Lấy dữ liệu mới nhất
 	v.mu.Lock()
@@ -382,187 +390,15 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage) {
 	}
 	payload, _ := cbor.Marshal(pkt)
 
-	// Gửi và đo RTT to update estOWD
-	start := time.Now()
+	// Gửi
 	if err := v.lora.Write(payload); err != nil {
 		slog.Warn("Failed to send telemetry", "err", err)
-		return
-	}
-	// // we don't have ack mechanism here; as approximation, measure local write duration
-	// elapsed := time.Since(start)
-	// // update estOWD as EWMA of previous and elapsed/2
-	// v.owdMu.Lock()
-	// prev := v.estOWDms
-	// meas := int64(elapsed.Milliseconds() / 2)
-	// alpha := 0.7
-	// v.estOWDms = int64(math.Round(alpha*float64(prev) + (1.0-alpha)*float64(meas)))
-	// v.owdMu.Unlock()
-
-	// we cannot measure true OWD without ACK; use conservative EWMA & bounds
-	elapsed := time.Since(start)
-	meas := int64(elapsed.Milliseconds() / 2)
-	if meas < 10 {
-		meas = 10
-	}
-	if meas > 2000 {
-		meas = 2000
-	}
-	// alpha smaller to reduce oscillation
-	alpha := 0.3
-	v.owdMu.Lock()
-	prev := v.estOWDms
-	v.estOWDms = int64(math.Round(alpha*float64(meas) + (1.0-alpha)*float64(prev)))
-	v.owdMu.Unlock()
-
-	slog.Debug("Sent Telemetry (TDMA)",
-		"vehicle", v.ID,
-		"slot", v.assignedSlot,
-		"lat", data.Latitude,
-		"lon", data.Longitude,
-		"estOWDms", v.estOWDms,
-	)
-}
-
-// sleepUntilRegisterWindow sleeps until the appropriate time to send HELLO
-// It uses NextCycleStart and regStartOffset logic and compensates for estimated one-way delay
-func (v *Vehicle) sleepUntilRegisterWindow(ctx context.Context, b model.BeaconMessage) bool {
-	cycleMs := int64(b.CycleDurationMs)
-	regWindowMs := int64(b.RegisterWindowMs)
-	regStartOffset := cycleMs - regWindowMs
-
-	// compute register window start for the next cycle
-	regStartMs := b.NextCycleStart + regStartOffset
-
-	// estimate one-way delay
-	v.owdMu.Lock()
-	estOWD := v.estOWDms
-	v.owdMu.Unlock()
-
-	// safety margin and minimal prep time
-	const safetyMs = int64(60)
-	const minPrepMs = int64(40)
-
-	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
-
-	// target time to start transmitting so arrival inside window
-	targetTxMs := regStartMs - estOWD - safetyMs
-	sleepMs := targetTxMs - nowMs
-
-	if sleepMs <= 0 {
-		// maybe still possible to send (small backoff) if we are within window
-		regEndMs := regStartMs + regWindowMs
-		arrivalIfNow := nowMs + estOWD
-		// if arrival before end and we have time to prepare -> do short random backoff
-		if arrivalIfNow+minPrepMs < regEndMs {
-			backoff := rand.Int63n(int64(math.Min(float64(regWindowMs/4), 200)))
-			select {
-			case <-ctx.Done():
-				return false
-			case <-time.After(time.Duration(backoff) * time.Millisecond):
-				return true
-			}
-		}
-		// else skip to next cycle
-		nextRegStart := regStartMs + cycleMs
-		sleepMs = nextRegStart - nowMs
-	}
-
-	if sleepMs > 0 {
-		timer := time.NewTimer(time.Duration(sleepMs) * time.Millisecond)
-		// defer timer.Stop()
-		defer func() {
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-		}()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-timer.C:
-			// IMPORTANT: re-check state/assignedSlot/last received beacon timestamp
-			if v.state == StateJoining && v.assignedSlot != -1 {
-				// slot already assigned while sleeping -> do NOT resend
-				return true
-			}
-			return true
-		}
-	}
-	return true
-}
-
-// sleepUntilSlot sleeps until the correct slot start (supports current or next cycle)
-func (v *Vehicle) sleepUntilSlot(ctx context.Context, b model.BeaconMessage, slotIndex int) bool {
-	// slotIndex assumed 0-based
-	slotDurMs := int64(b.SlotDurationMs)
-	guardMs := int64(b.GuardTimeMs)
-	oneSlotMs := slotDurMs + guardMs
-	// cycleMs := int64(b.CycleDurationMs)
-
-	// compute candidate starts: current cycle and next cycle
-	candidates := []int64{b.CycleStart, b.NextCycleStart}
-
-	v.owdMu.Lock()
-	estOWD := v.estOWDms
-	v.owdMu.Unlock()
-
-	const safetyMs = int64(40)
-	const minPrepMs = int64(20)
-
-	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
-
-	for _, base := range candidates {
-		slotStart := base + guardMs + int64(slotIndex)*oneSlotMs
-		// target transmit so arrival at slotStart
-		targetTxMs := slotStart - estOWD - safetyMs
-		sleepMs := targetTxMs - nowMs
-		if sleepMs <= 0 {
-			// maybe still possible if arrival before slot end
-			slotEnd := slotStart + slotDurMs
-			arrivalIfNow := nowMs + estOWD
-			if arrivalIfNow+minPrepMs < slotEnd {
-				// tiny random backoff to avoid collisions
-				backoff := rand.Int63n(50)
-				select {
-				case <-ctx.Done():
-					return false
-				case <-time.After(time.Duration(backoff) * time.Millisecond):
-					return true
-				}
-			}
-			// else try next candidate
-			continue
-		}
-		// wait until targetTxMs
-		timer := time.NewTimer(time.Duration(sleepMs) * time.Millisecond)
-		// defer timer.Stop()
-		defer func() {
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-		}()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-timer.C:
-			// IMPORTANT: re-check state/assignedSlot/last received beacon timestamp
-			if v.state == StateJoining && v.assignedSlot != -1 {
-				// slot already assigned while sleeping -> do NOT resend
-				return false
-			}
-			return true
-		}
-	}
-	// if nothing matched, wait a short time then return false to let caller skip
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(100 * time.Millisecond):
-		return false
+	} else {
+		slog.Debug("Sent Telemetry (TDMA)",
+			"vehicle", v.ID,
+			"slot", v.assignedSlot,
+			"lat", data.Latitude,
+			"lon", data.Longitude,
+		)
 	}
 }

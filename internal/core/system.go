@@ -60,7 +60,7 @@ func NewSystem(path string) (*System, error) {
 	time.Sleep(300 * time.Millisecond)
 
 	// 1. Mở kết nối DB ở đây (trong main)
-	dsn := "admin:admin@tcp(localhost:3006)/boat"
+	dsn := "admin:admin@tcp(localhost:3306)/boat_db"
 	sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
 	if err != nil {
 		slog.Error("Database established fail", "error", err)
@@ -134,7 +134,7 @@ func (s *System) Start(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown gracefully stops all components.
+// Stop gracefully stops all components.
 func (s *System) Stop() {
 	slog.Info("System is stopping...")
 	if s.cancel != nil {

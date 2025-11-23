@@ -86,8 +86,8 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 	}
 	buf := make([]byte, n)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
 
 	// 1. Thiết lập timeout cho Port trước khi đọc
 	if err := s.Port.SetReadTimeout(timeout); err != nil {

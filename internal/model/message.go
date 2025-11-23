@@ -12,7 +12,8 @@ const (
 type BeaconMessage struct {
 	Type             string `json:"type" cbor:"type"` // "beacon"
 	GatewayAddress   string `json:"gateway_address" cbor:"gateway_address"`
-	Timestamp        int64  `json:"timestamp" cbor:"timestamp"`
+	CycleStart       int64  `json:"cycle_start" cbor:"cycle_start"`
+	NextCycleStart   int64  `json:"next_cycle_start" cbor:"next_cycle_start"`
 	CycleDurationMs  int64  `json:"cycle_dur_ms" cbor:"cycle_dur_ms"` // Tổng thời gian chu kỳ
 	SlotDurationMs   int64  `json:"slot_dur_ms" cbor:"slot_dur_ms"`   // Thời gian 1 slot
 	GuardTimeMs      int64  `json:"guard_ms" cbor:"guard_ms"`         // Thời gian nghỉ giữa các slot
@@ -41,7 +42,6 @@ type RegisterResponse struct {
 
 // ArduinoData giả lập dữ liệu thô từ Arduino/Cảm biến.
 type ArduinoData struct {
-	Timestamp   int64   `json:"timestamp" cbor:"timestamp"`
 	Latitude    float64 `json:"latitude" cbor:"latitude"`
 	Longitude   float64 `json:"longitude" cbor:"longitude"`
 	CurrentHead int64   `json:"current_head" cbor:"current_head"`
@@ -62,9 +62,34 @@ type VehicleData struct {
 	RightSpeed  int64   `json:"right_speed" cbor:"right_speed"`
 }
 
+type VehicleApp struct {
+	VehicleID   string  `json:"boatId" cbor:"vehicle_id"`
+	Latitude    float64 `json:"lat" cbor:"latitude"`
+	Longitude   float64 `json:"lon" cbor:"longitude"`
+	CurrentHead int64   `json:"head" cbor:"current_head"`
+	TargetHead  int64   `json:"targetHead" cbor:"target_head"`
+	LeftSpeed   int64   `json:"leftSpeed" cbor:"left_speed"`
+	RightSpeed  int64   `json:"rightSpeed" cbor:"right_speed"`
+}
+
 // ControlData là gói tin điều khiển gửi từ Gateway xuống Vehicle.
 type ControlData struct {
-	Type      string `json:"type" cbor:"type"` // "control"
-	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	Command   string `json:"command" cbor:"command"` // e.g., "STOP_ENGINE", "SLOW_DOWN"
+	Type      string  `json:"type" cbor:"type"` // "control"
+	VehicleID string  `json:"vehicle_id" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"latitude" cbor:"latitude"`
+	Longitude float64 `json:"longitude" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
+}
+
+type ControlApp struct {
+	VehicleID string  `json:"boatId" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"targetLat" cbor:"latitude"`
+	Longitude float64 `json:"targetLon" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
 }

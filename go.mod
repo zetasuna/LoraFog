@@ -5,6 +5,7 @@ go 1.24.6
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/gorilla/websocket v1.5.3
 	go.bug.st/serial v1.6.4
 	go.etcd.io/bbolt v1.4.3
 	gopkg.in/yaml.v3 v3.0.1

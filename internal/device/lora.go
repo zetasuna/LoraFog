@@ -2,11 +2,6 @@
 // It is used for LoRa links between Vehicle and Gateway.
 package device
 
-// CHANGELOG (refactor v2):
-// - Added new binary-based LoraDevice (no simulation, unlike Arduino)
-// - Uses Serial.ReadBytes() and WriteBytes() for CBOR payloads
-// - Safe close and structured logging (slog)
-
 import (
 	"encoding/binary"
 	"errors"

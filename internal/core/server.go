@@ -12,7 +12,11 @@ import (
 
 	"LoraFog/internal/database"
 	"LoraFog/internal/model"
+
+	"github.com/gorilla/websocket"
 )
+
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 // Session đại diện cho một kết nối Vehicle đang hoạt động
 type Session struct {
@@ -30,6 +34,7 @@ type Server struct {
 	database   *database.ServerDB // Giả lập Database
 	httpClient *http.Client
 	// httpServer *http.Server
+	clients map[*websocket.Conn]bool
 
 	mutex        sync.Mutex
 	sessions     map[string]*Session     // Map: VehicleID -> Session
@@ -62,15 +67,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", s.handleRegister)
 	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
+	// mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/command", s.handleControl)
+	mux.HandleFunc("/ws", s.handleWS)
 
 	server := &http.Server{Addr: s.Address, Handler: mux}
 
-	// if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-	// 	slog.Error("Server HTTP failed to start", "error", err)
-	// }
-	// slog.Info("Server started", "address", s.Address)
-	// return nil
-	//
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			slog.Error("Server HTTP failed to start", "error", err)
@@ -96,6 +98,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info(
+		"Server received register",
+		"gateway", req.GatewayAddress,
+		"vehicle", req.VehicleID,
+	)
+
 	if req.VehicleID == "" || req.GatewayAddress == "" {
 		http.Error(w,
 			"vehicle and gateway required",
@@ -104,39 +112,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mutex.Lock()
 	// 1. Logic Roaming/Trùng Session
+	var oldGw string
+	var oldSlot int
+	s.mutex.Lock()
 	if oldSes, ok := s.sessions[req.VehicleID]; ok {
-		// Release old slot and update DB to clear gateway
+		oldGw = oldSes.GatewayAddress
+		oldSlot = oldSes.Slot
+
 		delete(s.sessions, req.VehicleID)
-		if oldSes.GatewayAddress != req.GatewayAddress {
-			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
-			// Update DB to clear gateway for vehicle (safeguard)
-			go func(vehicle, oldgw string) {
-				_ = s.database.UpdateVehicleGateway(
-					context.Background(),
-					vehicle,
-					"",
-				)
-				// push update to old gateway
-				go s.pushSlotUpdateToGateway(oldgw)
-			}(req.VehicleID, oldSes.GatewayAddress)
-			slog.Info(
-				"Roaming: cleared old session",
-				"vehicle", req.VehicleID,
-				"old_gw", oldSes.GatewayAddress,
-			)
-		} else {
-			// re-registration same gw: release slot so we can assign afresh
-			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
-			slog.Info(
-				"Re-registration: old slot released",
-				"vehicle", req.VehicleID,
-				"gw", req.GatewayAddress,
-			)
-		}
+		s.releaseSlot(oldGw, oldSlot)
 	}
+	s.mutex.Unlock()
+
+	// 2. Nếu có session cũ → unregister DB + push update
+	if oldGw != "" {
+		// Update DB to clear gateway for vehicle (safeguard)
+		_ = s.database.UpdateVehicleGateway(
+			context.Background(),
+			req.VehicleID,
+			"",
+		)
+		s.pushSlotUpdateToGateway(oldGw)
+		slog.Info(
+			"Roaming: cleared old session",
+			"vehicle", req.VehicleID,
+			"old_gw", oldGw,
+		)
+	}
+
 	// 2. Cấp Slot mới tại Gateway mới
+	s.mutex.Lock()
 	newSlot := s.assignNewSlot(req.GatewayAddress)
 	if newSlot == -1 {
 		s.mutex.Unlock()
@@ -207,6 +213,12 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
+	slog.Info(
+		"Server received telemetry",
+		"vehicle", telem.VehicleID,
+		"lat", telem.Latitude,
+		"lon", telem.Longitude,
+	)
 
 	s.mutex.Lock()
 	if ses, ok := s.sessions[telem.VehicleID]; ok {
@@ -220,7 +232,16 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					3*time.Second,
 				)
 				defer cancel()
-				body, _ := json.Marshal(t)
+				vehicleApp := model.VehicleApp{
+					VehicleID:   t.VehicleID,
+					Latitude:    t.Latitude,
+					Longitude:   t.Longitude,
+					CurrentHead: t.CurrentHead,
+					TargetHead:  t.TargetHead,
+					LeftSpeed:   t.LeftSpeed,
+					RightSpeed:  t.RightSpeed,
+				}
+				body, _ := json.Marshal(vehicleApp)
 				req, err := http.NewRequestWithContext(ctx,
 					"POST",
 					"http://"+s.AppAddress+"/api/telemetry",
@@ -237,6 +258,8 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				_ = resp.Body.Close()
+				s.broadcast(string(body))
+				// slog.Info("broadcast to websocket")
 			}(telem)
 		}
 	} else {
@@ -246,6 +269,66 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	s.mutex.Unlock()
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() { _ = r.Body.Close() }()
+
+	var controlApp model.ControlApp
+	if err := json.NewDecoder(r.Body).Decode(&controlApp); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+	slog.Info("Server received control")
+
+	if controlApp.VehicleID == "" {
+		http.Error(w,
+			"vehicle id required",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	gatewayID, _ := s.database.GetVehicleGateway(context.Background(), controlApp.VehicleID)
+	if gatewayID == "" {
+		slog.Error("Control cannot reach because vehicle not belong to any gateway")
+		return
+	}
+
+	controlData := model.ControlData{
+		Type:      model.PacketControl,
+		VehicleID: controlApp.VehicleID,
+		Speed:     controlApp.Speed,
+		Latitude:  controlApp.Latitude,
+		Longitude: controlApp.Longitude,
+		Kp:        controlApp.Kp,
+		Ki:        controlApp.Ki,
+		Kd:        controlApp.Kd,
+	}
+	go func(c model.ControlData) {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			3*time.Second,
+		)
+		defer cancel()
+		body, _ := json.Marshal(c)
+		req, err := http.NewRequestWithContext(ctx,
+			"POST",
+			"http://"+gatewayID+"/api/control",
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			slog.Warn("failed build forward request", "err", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			slog.Warn("forward control failed", "err", err)
+			return
+		}
+		_ = resp.Body.Close()
+	}(controlData)
 }
 
 // sweeper: Quét các Session đã hết hạn (TTL Expired)
@@ -366,5 +449,41 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 		slog.Warn("Gateway rejected slot update", "gw_addr", gwAddr, "status", resp.Status)
 	} else {
 		slog.Info("Successfully pushed slot map to Gateway", "gw_addr", gwAddr, "count", len(slotMap))
+	}
+}
+
+// handleWS upgrades HTTP to websocket and registers the client for broadcasts.
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	s.mutex.Lock()
+	s.clients[conn] = true
+	s.mutex.Unlock()
+
+	go func() {
+		defer func() {
+			s.mutex.Lock()
+			delete(s.clients, conn)
+			s.mutex.Unlock()
+			if err := conn.Close(); err != nil {
+				slog.Error("Failed to close websocket", "error", err)
+			}
+		}()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				break
+			}
+		}
+	}()
+}
+
+// broadcast sends a message to all connected websocket clients.
+func (s *Server) broadcast(msg string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	for c := range s.clients {
+		_ = c.WriteMessage(websocket.TextMessage, []byte(msg))
 	}
 }

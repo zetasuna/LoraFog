@@ -72,7 +72,6 @@ func (s *ServerDB) UpdateVehicleGateway(ctx context.Context, vehicleID, gatewayI
 }
 
 // GetVehicleGateway returns gatewayId for given vehicle boatId. Returns "" if none.
-// UPDATED v2
 func (s *ServerDB) GetVehicleGateway(ctx context.Context, vehicleID string) (string, error) {
 	if s == nil || s.db == nil {
 		return "", errors.New("db not initialized")
