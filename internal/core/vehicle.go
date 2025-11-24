@@ -140,11 +140,11 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 			v.mu.Lock()
 			v.lastTelemetry = data
 			v.mu.Unlock()
-			// slog.Info("Vehicle received arduino data",
-			// 	"vehicle", v.ID,
-			// 	"lat", data.Latitude,
-			// 	"lon", data.Longitude,
-			// )
+			slog.Info("Vehicle received arduino data",
+				"vehicle", v.ID,
+				"lat", data.Latitude,
+				"lon", data.Longitude,
+			)
 		}
 	}
 }
