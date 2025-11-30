@@ -144,6 +144,10 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 				"vehicle", v.ID,
 				"lat", data.Latitude,
 				"lon", data.Longitude,
+				"curHead", data.CurrentHead,
+				"tarHead", data.TargetHead,
+				"leftSpeed", data.LeftSpeed,
+				"rightSpeed", data.RightSpeed,
 			)
 		}
 	}
