@@ -60,8 +60,10 @@ func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
 
 			var d model.ArduinoData
 			if _, err := fmt.Sscanf(line, "%f,%f,%d,%d,%d,%d",
-				&d.Latitude, &d.Longitude, &d.CurrentHead,
-				&d.TargetHead, &d.LeftSpeed, &d.RightSpeed); err != nil {
+				&d.Latitude, &d.Longitude,
+				&d.LeftSpeed, &d.RightSpeed,
+				&d.CurrentHead, &d.TargetHead,
+			); err != nil {
 				continue
 			}
 			select {
@@ -101,8 +103,8 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 	// --- Server Command State ---
 	var (
 		baseSpeed = 1000.0
-		targetLat = 21.027100
-		targetLon = 105.835600
+		targetLat = 21.0532
+		targetLon = 105.8261
 		Kp        = 0.0
 		Ki        = 0.0
 		Kd        = 0.0
@@ -185,10 +187,8 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 			// --- 5. Gửi dữ liệu như Arduino thật ---
 			line := fmt.Sprintf("%.6f,%.6f,%d,%d,%d,%d",
 				latNow, lonNow,
-				int(headNow),
-				int(targetHead),
-				int(left),
-				int(right),
+				int(left), int(right),
+				int(headNow), int(targetHead),
 			)
 
 			if err := a.Write(line); err != nil {

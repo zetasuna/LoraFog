@@ -1,47 +1,376 @@
 
-- /configs/config.yml
+- /arduino/src/main.cpp
 ```go
-server:
-  address: "127.0.0.1:10000"
-  app_address: "127.0.0.1:3001"
+// FINAL
 
-gateways:
-  - address: "127.0.0.1:10001"
-    server_address: "127.0.0.1:10000"
-    lora_device: "/tmp/ttyGW1"
-    lora_baud: 9600
-  - address: "127.0.0.1:10002"
-    server_address: "127.0.0.1:10000"
-    lora_device: "/tmp/ttyGW2"
-    lora_baud: 9600
+#include <Arduino.h>
+#include <QMC5883LCompass.h>
+#include <Servo.h>
+#include <SoftwareSerial.h>
+#include <TinyGPSPlus.h>
+#include <stdint.h>
 
-vehicles:
-  - id: "VH01"
-    lora_device: "/tmp/ttyVH1"
-    lora_baud: 9600
-    arduino_device: "/tmp/ttyADR1"
-    arduino_baud: 9600
-  - id: "VH02"
-    lora_device: "/tmp/ttyVH2"
-    lora_baud: 9600
-    arduino_device: "/tmp/ttyADR2"
-    arduino_baud: 9600
+// === CONFIG ===
+#define GPS_TX_PIN 3
+#define GPS_RX_PIN 4
+#define RIGHT_ESC_PIN 2
+#define LEFT_ESC_PIN 5
+#define SERIAL_BAUD 9600
+#define GPS_BAUD 9600
+#define MIN_PPM 1000
+#define MAX_PPM 2000
+#define DEFAULT_LATITUDE 0.0
+#define DEFAULT_LONGITUDE 0.0
+#define DEFAULT_HEADING 0
+#define UPDATE_INTERVAL 1000
+#define DISTANCE_STOP 2.0 // 2m
 
-arduinos:
-  - device: "/tmp/ttyADS1"
-    baud: 9600
-  - device: "/tmp/ttyADS2"
-    baud: 9600
+// === STRUCT ===
+struct TelemetryData {
+  float latitude;
+  float longitude;
+  int16_t left_motor_speed;  // ppm
+  int16_t right_motor_speed; // ppm
+  int16_t current_heading;   // degrees
+  int16_t desired_heading;   // degrees
+};
 
-virtual_serials:
-  - left: "/tmp/ttyGW1"
-    right: "/tmp/ttyVH1"
-  - left: "/tmp/ttyADS1"
-    right: "/tmp/ttyADR1"
-  - left: "/tmp/ttyGW2"
-    right: "/tmp/ttyVH2"
-  - left: "/tmp/ttyADS2"
-    right: "/tmp/ttyADR2"
+struct ControlData {
+  int16_t cruise_speed; // ppm
+  float latitude;
+  float longitude;
+  float kp;
+  float ki;
+  float kd;
+};
+
+// === GLOBALS ===
+QMC5883LCompass compass;
+Servo right_esc;
+Servo left_esc;
+SoftwareSerial gpsSerial(GPS_TX_PIN, GPS_RX_PIN);
+TinyGPSPlus gps;
+
+struct TelemetryData t_data;
+struct ControlData c_data;
+
+bool has_target = false;
+int16_t left_motor_speed = MIN_PPM;
+int16_t right_motor_speed = MIN_PPM;
+float latitude = DEFAULT_LATITUDE;
+float longitude = DEFAULT_LONGITUDE;
+int16_t current_heading = DEFAULT_HEADING;
+int16_t desired_heading = DEFAULT_HEADING;
+unsigned long last_update = 0;
+
+// === FUNCTION DECLARATIONS ===
+void autoControl();
+void stopBoat();
+bool isAtTarget(float current_latitude, float current_longitude,
+                float target_latitude, float target_longitude);
+void updateTelemetry();
+void sendTelemetry();
+void processControlMessage(const String &line);
+int16_t getHeading();
+int16_t calculateBearing(float current_latitude, float current_longitude,
+                         float target_latitude, float target_longitude);
+int16_t calculateTurnAngle(int16_t current, int16_t desired);
+int16_t calculateLeftSpeed(int16_t error, int16_t turn_direction);
+int16_t calculateRightSpeed(int16_t error, int16_t turn_direction);
+
+// === SETUP ===
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  gpsSerial.begin(GPS_BAUD);
+  compass.init();
+
+  right_esc.attach(RIGHT_ESC_PIN);
+  left_esc.attach(LEFT_ESC_PIN);
+  right_esc.writeMicroseconds(MIN_PPM);
+  left_esc.writeMicroseconds(MIN_PPM);
+  delay(2000);
+
+  t_data.latitude = DEFAULT_LATITUDE;
+  t_data.longitude = DEFAULT_LONGITUDE;
+  t_data.left_motor_speed = MIN_PPM;
+  t_data.right_motor_speed = MIN_PPM;
+  t_data.current_heading = DEFAULT_HEADING;
+  t_data.desired_heading = DEFAULT_HEADING;
+
+  stopBoat();
+}
+
+// === LOOP ===
+void loop() {
+  unsigned long now = millis();
+  if (now - last_update >= UPDATE_INTERVAL) {
+    autoControl();
+    updateTelemetry();
+    sendTelemetry();
+    last_update = now;
+  }
+
+  if (gpsSerial.available()) {
+    if (gps.encode(gpsSerial.read())) {
+      latitude = gps.location.isValid() ? gps.location.lat() : 0.0;
+      longitude = gps.location.isValid() ? gps.location.lng() : 0.0;
+      if (has_target && gps.location.isValid()) {
+        desired_heading = calculateBearing(latitude, longitude, c_data.latitude,
+                                           c_data.longitude);
+      }
+    }
+  }
+
+  if (Serial.available()) {
+    String control = Serial.readStringUntil('\n');
+    control.trim();
+    if (control.length() > 0) {
+      processControlMessage(control);
+      has_target = true;
+    }
+  }
+}
+
+// === CONTROL BOAT ===
+void autoControl() {
+  if (has_target &&
+      isAtTarget(latitude, longitude, c_data.latitude, c_data.longitude)) {
+    has_target = false;
+    stopBoat();
+    return;
+  }
+  current_heading = getHeading();
+  int16_t turn_angle = calculateTurnAngle(current_heading, desired_heading);
+  int16_t turn_direction = (turn_angle > 180) ? -1 : 1;
+  int16_t error = (turn_angle > 180) ? (turn_angle - 360) : turn_angle;
+  error = constrain(error, -90, 90);
+
+  left_motor_speed = calculateLeftSpeed(error, turn_direction);
+  right_motor_speed = calculateRightSpeed(error, turn_direction);
+
+  left_motor_speed = constrain(left_motor_speed, MIN_PPM, MAX_PPM);
+  right_motor_speed = constrain(right_motor_speed, MIN_PPM, MAX_PPM);
+
+  left_esc.writeMicroseconds(left_motor_speed);
+  right_esc.writeMicroseconds(right_motor_speed);
+}
+
+void stopBoat() {
+  left_motor_speed = MIN_PPM;
+  right_motor_speed = MIN_PPM;
+  left_esc.writeMicroseconds(left_motor_speed);
+  right_esc.writeMicroseconds(right_motor_speed);
+}
+
+// === CHECK ARRIVAL ===
+bool isAtTarget(float current_latitude, float current_longitude,
+                float target_latitude, float target_longitude) {
+  const float EARTH_RADIUS = 6371000.0; // m
+  float delta_latitude = radians(target_latitude - current_latitude);
+  float delta_longitude = radians(target_longitude - current_longitude);
+  float a = sin(delta_latitude / 2) * sin(delta_latitude / 2) +
+            cos(radians(current_latitude)) * cos(radians(target_latitude)) *
+                sin(delta_longitude / 2) * sin(delta_longitude / 2);
+  float c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  float distance = EARTH_RADIUS * c;
+  return distance < DISTANCE_STOP; // đã đến nếu cách mục tiêu < 2m
+}
+
+// === TELEMETRY ===
+void updateTelemetry() {
+  t_data.latitude = latitude;
+  t_data.longitude = longitude;
+  t_data.left_motor_speed = left_motor_speed;
+  t_data.right_motor_speed = right_motor_speed;
+  t_data.current_heading = current_heading;
+  t_data.desired_heading = desired_heading;
+}
+
+void sendTelemetry() {
+  Serial.print(t_data.latitude, 6);
+  Serial.print(",");
+  Serial.print(t_data.longitude, 6);
+  Serial.print(",");
+  Serial.print(t_data.left_motor_speed);
+  Serial.print(",");
+  Serial.print(t_data.right_motor_speed);
+  Serial.print(",");
+  Serial.print(t_data.current_heading);
+  Serial.print(",");
+  Serial.println(t_data.desired_heading);
+}
+
+// === CONTROL ===
+void processControlMessage(const String &line) {
+  int16_t last_index = 0;
+  int16_t token_index = 0;
+  String tokens[6];
+  for (int16_t i = 0; i < 6; i++)
+    tokens[i] = "";
+
+  while (token_index < 6) {
+    int comma_index = line.indexOf(',', last_index);
+    if (comma_index == -1) {
+      tokens[token_index++] = line.substring(last_index);
+      break;
+    }
+    tokens[token_index++] = line.substring(last_index, comma_index);
+    last_index = comma_index + 1;
+  }
+
+  c_data.cruise_speed = tokens[0].toInt();
+  c_data.latitude = tokens[1].toFloat();
+  c_data.longitude = tokens[2].toFloat();
+  c_data.kp = tokens[3].toFloat();
+  c_data.ki = tokens[4].toFloat();
+  c_data.kd = tokens[5].toFloat();
+  // Serial.print(c_data.kp, 6);
+  // Serial.print(",");
+  // Serial.print(c_data.ki, 6);
+  // Serial.print(",");
+  // Serial.print(c_data.kd, 6);
+  // Serial.print(",");
+  // Serial.print(c_data.cruise_speed);
+  // Serial.print(",");
+  // Serial.println(c_data.desired_heading);
+}
+
+// === UTILS ===
+int16_t getHeading() {
+  compass.read();
+  int16_t azimuth = compass.getAzimuth();
+  if (azimuth < 0)
+    azimuth += 360;
+  return azimuth;
+}
+
+int16_t calculateBearing(float current_latitude, float current_longitude,
+                         float target_latitude, float target_longitude) {
+  float delta_longitude = radians(target_longitude - current_longitude);
+  float y = sin(delta_longitude) * cos(radians(target_latitude));
+  float x = cos(radians(current_latitude)) * sin(radians(target_latitude)) -
+            sin(radians(current_latitude)) * cos(radians(target_latitude)) *
+                cos(delta_longitude);
+  float bearing = atan2(y, x) * 180 / PI;
+  bearing = fmodf((bearing + 360), 360);
+  return int16_t(round(bearing));
+}
+
+int16_t calculateTurnAngle(int16_t current, int16_t desired) {
+  return (desired - current + 360) % 360;
+}
+
+int16_t calculateLeftSpeed(int16_t error, int16_t turn_direction) {
+  int16_t left_speed =
+      c_data.cruise_speed + (c_data.kp * error * turn_direction);
+  left_speed = constrain(left_speed, MIN_PPM, MAX_PPM);
+  return left_speed;
+}
+
+int16_t calculateRightSpeed(int16_t error, int16_t turn_direction) {
+  int16_t right_speed =
+      c_data.cruise_speed - (c_data.kp * error * turn_direction);
+  right_speed = constrain(right_speed, MIN_PPM, MAX_PPM);
+  return right_speed;
+}
+
+```
+
+- /cmd/lora_fog/main.go
+```go
+// Command lora runs the LoraFog system orchestrator.
+//
+// CHANGELOG (refactor v2):
+// - Unified startup with structured logging and graceful shutdown
+// - Integrated util.SetupLogger()
+// - Uses context cancellation on SIGINT/SIGTERM
+// - Validates YAML configuration before launch
+// - Safe close sequence for System
+// - Clean exit codes and consistent logs
+
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"LoraFog/internal/core"
+	"LoraFog/internal/model"
+	"LoraFog/internal/util"
+
+	"gopkg.in/yaml.v3"
+)
+
+func main() {
+	// --- Parse CLI flags ---
+	cfgPath := flag.String("c", "configs/config.yml", "Path to YAML configuration file")
+	flag.Parse()
+
+	// --- Setup global logger ---
+	util.SetupLogger()
+	slog.Info("starting LoraFog runtime", "component", "main", "config", *cfgPath)
+
+	// --- Validate config early ---
+	cfg, err := loadAndValidateConfig(*cfgPath)
+	if err != nil {
+		slog.Error("invalid configuration", "component", "main", "error", err)
+		os.Exit(1)
+	}
+	_ = cfg // not used directly (System loads internally)
+
+	// --- Create system instance ---
+	system, err := core.NewSystem(*cfgPath)
+	if err != nil {
+		slog.Error("failed to initialize system", "component", "main", "error", err)
+		os.Exit(1)
+	}
+
+	// --- Setup signal handling for graceful shutdown ---
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// --- Start all components ---
+	if err := system.Start(ctx); err != nil {
+		slog.Error("system start failed", "component", "main", "error", err)
+		os.Exit(1)
+	}
+
+	// --- Wait for termination signal ---
+	slog.Info("system running (press Ctrl+C to exit)", "component", "main")
+	<-ctx.Done()
+
+	// --- Graceful shutdown ---
+	slog.Info("shutting down system...", "component", "main")
+	system.Stop()
+
+	// Allow time for async cleanup/logs
+	time.Sleep(500 * time.Millisecond)
+	slog.Info("LoraFog terminated successfully", "component", "main")
+}
+
+// loadAndValidateConfig loads the YAML file and validates it.
+func loadAndValidateConfig(path string) (*model.Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg model.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, errors.New("configuration invalid: " + err.Error())
+	}
+	return &cfg, nil
+}
 
 ```
 
@@ -80,7 +409,7 @@ type GatewayConfig struct {
 
 // VehicleConfig config for a Vehicle agent.
 type VehicleConfig struct {
-	ID            string `yaml:"id" json:"id" cbor:"id"`
+	VehicleID     string `yaml:"id" json:"id" cbor:"id"`
 	LoraDevice    string `yaml:"lora_device" json:"lora_device" cbor:"lora_device"`
 	LoraBaud      int    `yaml:"lora_baud" json:"lora_baud" cbor:"lora_baud"`
 	ArduinoDevice string `yaml:"arduino_device" json:"arduino_device" cbor:"arduino_device"`
@@ -118,7 +447,7 @@ func (c *Config) Validate() error {
 	}
 	// Validate vehicles
 	for i, v := range c.Vehicles {
-		if v.ID == "" {
+		if v.VehicleID == "" {
 			return fmt.Errorf("vehicles[%d]: id is empty", i)
 		}
 	}
@@ -143,7 +472,8 @@ const (
 type BeaconMessage struct {
 	Type             string `json:"type" cbor:"type"` // "beacon"
 	GatewayAddress   string `json:"gateway_address" cbor:"gateway_address"`
-	Timestamp        int64  `json:"timestamp" cbor:"timestamp"`
+	CycleStart       int64  `json:"cycle_start" cbor:"cycle_start"`
+	NextCycleStart   int64  `json:"next_cycle_start" cbor:"next_cycle_start"`
 	CycleDurationMs  int64  `json:"cycle_dur_ms" cbor:"cycle_dur_ms"` // Tổng thời gian chu kỳ
 	SlotDurationMs   int64  `json:"slot_dur_ms" cbor:"slot_dur_ms"`   // Thời gian 1 slot
 	GuardTimeMs      int64  `json:"guard_ms" cbor:"guard_ms"`         // Thời gian nghỉ giữa các slot
@@ -172,7 +502,6 @@ type RegisterResponse struct {
 
 // ArduinoData giả lập dữ liệu thô từ Arduino/Cảm biến.
 type ArduinoData struct {
-	Timestamp   int64   `json:"timestamp" cbor:"timestamp"`
 	Latitude    float64 `json:"latitude" cbor:"latitude"`
 	Longitude   float64 `json:"longitude" cbor:"longitude"`
 	CurrentHead int64   `json:"current_head" cbor:"current_head"`
@@ -193,11 +522,36 @@ type VehicleData struct {
 	RightSpeed  int64   `json:"right_speed" cbor:"right_speed"`
 }
 
+type VehicleApp struct {
+	VehicleID   string  `json:"boatId" cbor:"vehicle_id"`
+	Latitude    float64 `json:"lat" cbor:"latitude"`
+	Longitude   float64 `json:"lon" cbor:"longitude"`
+	CurrentHead int64   `json:"head" cbor:"current_head"`
+	TargetHead  int64   `json:"targetHead" cbor:"target_head"`
+	LeftSpeed   int64   `json:"leftSpeed" cbor:"left_speed"`
+	RightSpeed  int64   `json:"rightSpeed" cbor:"right_speed"`
+}
+
 // ControlData là gói tin điều khiển gửi từ Gateway xuống Vehicle.
 type ControlData struct {
-	Type      string `json:"type" cbor:"type"` // "control"
-	VehicleID string `json:"vehicle_id" cbor:"vehicle_id"`
-	Command   string `json:"command" cbor:"command"` // e.g., "STOP_ENGINE", "SLOW_DOWN"
+	Type      string  `json:"type" cbor:"type"` // "control"
+	VehicleID string  `json:"vehicle_id" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"latitude" cbor:"latitude"`
+	Longitude float64 `json:"longitude" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
+}
+
+type ControlApp struct {
+	VehicleID string  `json:"boatId" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"targetLat" cbor:"latitude"`
+	Longitude float64 `json:"targetLon" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
 }
 
 ```
@@ -206,10 +560,6 @@ type ControlData struct {
 ```go
 // Package util provides small utilities used by the system.
 package util
-
-// CHANGELOG (refactor v2):
-// - Centralized slog setup for structured logging
-// - Exported SetupLogger for callers to initialize global log behavior
 
 import (
 	"log/slog"
@@ -221,7 +571,7 @@ import (
 func SetupLogger() {
 	// Use default handler (console) but include time and source.
 	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource: true,
+		AddSource: false,
 	})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
@@ -234,11 +584,6 @@ func SetupLogger() {
 ```go
 // Package util provides helpers for virtual serial management using socat.
 package util
-
-// CHANGELOG (refactor v2):
-// - Improved process tracking and safe cleanup
-// - Added context-aware start with error handling
-// - Standardized naming and structured logging
 
 import (
 	"context"
@@ -360,6 +705,747 @@ func (m *SocatManager) CleanupAll() {
 
 ```
 
+- /internal/core/system.go
+```go
+// Package core orchestrates system startup and shutdown.
+package core
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"sync"
+	"time"
+
+	"LoraFog/internal/database"
+	"LoraFog/internal/device"
+	"LoraFog/internal/model"
+	"LoraFog/internal/util"
+
+	"gopkg.in/yaml.v3"
+)
+
+// System manages Fog server, gateways, and vehicles.
+type System struct {
+	configPath   string
+	config       *model.Config
+	server       *Server
+	gateways     []*Gateway
+	vehicles     []*Vehicle
+	arduinos     []*device.Arduino
+	serverDB     *database.ServerDB
+	socatManager *util.SocatManager
+
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// NewSystem constructs a System from YAML configuration.
+func NewSystem(path string) (*System, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg model.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	sys := &System{
+		configPath:   path,
+		config:       &cfg,
+		socatManager: util.NewSocatManager(),
+	}
+
+	for _, vs := range cfg.VirtualSerials {
+		if err := sys.socatManager.CreatePair(
+			vs.Left,
+			vs.Right,
+		); err != nil {
+			slog.Error("Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// 1. Mở kết nối DB ở đây (trong main)
+	dsn := "admin:admin@tcp(localhost:3306)/boat_db"
+	sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
+	if err != nil {
+		slog.Error("Database established fail", "error", err)
+	} else {
+		slog.Info("Database established success")
+	}
+	if cfg.Server.Address != "" {
+		sys.server = NewServer(
+			cfg.Server.Address,
+			cfg.Server.AppAddress,
+			sys.serverDB,
+		)
+	}
+	for _, g := range cfg.Gateways {
+		sys.gateways = append(sys.gateways, NewGateway(
+			g.Address,
+			g.ServerAddress,
+			g.LoraDevice,
+			g.LoraBaud,
+		))
+	}
+	for _, v := range cfg.Vehicles {
+		sys.vehicles = append(sys.vehicles, NewVehicle(
+			v.VehicleID,
+			v.LoraDevice,
+			v.LoraBaud,
+			v.ArduinoDevice,
+			v.ArduinoBaud,
+		))
+	}
+	for _, a := range cfg.Arduinos {
+		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Device, a.Baud))
+	}
+
+	return sys, nil
+}
+
+// Start launches all system components.
+func (s *System) Start(ctx context.Context) error {
+	if s.server == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
+		return fmt.Errorf("no active components")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+
+	if s.server != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			_ = s.server.Start(ctx)
+		}()
+	}
+	for _, gw := range s.gateways {
+		_ = gw.Start(ctx)
+	}
+	for _, vh := range s.vehicles {
+		_ = vh.Start(ctx)
+	}
+	for _, ino := range s.arduinos {
+		s.wg.Add(1)
+		go func(ino *device.Arduino) {
+			defer s.wg.Done()
+			stop := make(chan struct{})
+			go func() {
+				<-ctx.Done()
+				close(stop)
+			}()
+			_ = ino.StartSimulation(stop)
+		}(ino)
+	}
+	return nil
+}
+
+// Stop gracefully stops all components.
+func (s *System) Stop() {
+	slog.Info("System is stopping...")
+	if s.cancel != nil {
+		s.cancel()
+	}
+	for _, gw := range s.gateways {
+		gw.Stop()
+	}
+	for _, vh := range s.vehicles {
+		vh.Stop()
+	}
+	for _, ino := range s.arduinos {
+		_ = ino.Close()
+	}
+	// if s.server != nil {
+	// 	_ = s.server.Stop()
+	// }
+	if s.serverDB != nil {
+		_ = s.serverDB.Close()
+	}
+	if s.socatManager != nil {
+		s.socatManager.Cleanup()
+	}
+	s.wg.Wait()
+	slog.Info("Shutdown complete")
+}
+
+```
+
+- /internal/core/vehicle.go
+```go
+// Package core implements the Vehicle agent
+package core
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math"
+	"math/rand"
+	"sync"
+	"time"
+
+	"LoraFog/internal/device"
+	"LoraFog/internal/model"
+
+	"github.com/fxamacker/cbor/v2"
+)
+
+// VehicleState định nghĩa trạng thái của xe
+type VehicleState int
+
+const (
+	StateIdle    VehicleState = 0 // Chờ Beacon, chưa có slot
+	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
+	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
+)
+
+// Vehicle là đại diện cho thiết bị thuyền/xe
+type Vehicle struct {
+	ID      string
+	lora    *device.Lora
+	arduino *device.Arduino // Có thể nil nếu dùng dữ liệu giả lập
+
+	state          VehicleState
+	currentGateway string
+	assignedSlot   int
+
+	// Cache dữ liệu telemetry mới nhất từ Arduino
+	mu            sync.Mutex
+	lastTelemetry model.ArduinoData
+
+	// estimated one way delay (ms) for timing compensation
+	estOWDms int64
+	owdMu    sync.Mutex
+
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// NewVehicle tạo một Vehicle mới
+func NewVehicle(
+	id string,
+	loraDev string, loraBaud int,
+	arduinoDev string, arduinoBaud int,
+) *Vehicle {
+	lora := device.NewLora(loraDev, loraBaud)
+	v := &Vehicle{
+		ID:           id,
+		lora:         lora,
+		state:        StateIdle,
+		assignedSlot: -1,
+		estOWDms:     150, // default initial estimate (ms)
+	}
+	if arduinoDev != "" {
+		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
+	}
+	return v
+}
+
+func (v *Vehicle) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	v.cancel = cancel
+
+	slog.Info("Vehicle started", "id", v.ID)
+
+	// 1. Goroutine đọc Arduino liên tục để update lastTelem
+	if v.arduino != nil {
+		v.wg.Add(1)
+		go v.arduinoLoop(ctx)
+	}
+
+	// 2. Goroutine chính: LoRa Loop (State Machine)
+	v.wg.Add(1)
+	go v.loraLoop(ctx)
+
+	return nil
+}
+
+func (v *Vehicle) Stop() {
+	if v.cancel != nil {
+		v.cancel()
+	}
+	if v.lora != nil {
+		if err := v.lora.Close(); err != nil {
+			slog.Warn("Failed to close LoRa device", "error", err)
+		}
+	}
+	if v.arduino != nil {
+		if err := v.arduino.Close(); err != nil {
+			slog.Warn("Failed to close Arduino device", "error", err)
+		}
+	}
+	v.wg.Wait()
+	slog.Info("Vehicle stopped", "id", v.ID)
+}
+
+// arduinoLoop đọc dữ liệu từ Arduino/Simulator
+func (v *Vehicle) arduinoLoop(ctx context.Context) {
+	defer v.wg.Done()
+	dataCh := make(chan model.ArduinoData, 5)
+	stop, err := v.arduino.Read(dataCh)
+	if err != nil {
+		slog.Warn("Arduino.Read returned error", "err", err)
+		return
+	}
+	defer stop()
+
+	// Khởi tạo data giả nếu arduino nil
+	if v.arduino == nil {
+		v.mu.Lock()
+		v.lastTelemetry = model.ArduinoData{
+			Latitude:    21.027 + rand.Float64()*0.001,
+			Longitude:   105.835 + rand.Float64()*0.001,
+			CurrentHead: rand.Int63n(361),
+			TargetHead:  rand.Int63n(361),
+			LeftSpeed:   1000 + rand.Int63n(1000),
+			RightSpeed:  1000 + rand.Int63n(1000),
+		}
+		v.mu.Unlock()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-dataCh:
+			if !ok {
+				return
+			}
+			v.mu.Lock()
+			v.lastTelemetry = data
+			v.mu.Unlock()
+			slog.Info("Vehicle received arduino data",
+				"vehicle", v.ID,
+				"lat", data.Latitude,
+				"lon", data.Longitude,
+			)
+		}
+	}
+}
+
+// loraLoop là State Machine chính của Vehicle
+func (v *Vehicle) loraLoop(ctx context.Context) {
+	defer v.wg.Done()
+
+	// Sử dụng giá trị mặc định cho timeout chờ beacon (ví dụ: 5 giây)
+	beaconTimeout := 5 * time.Second
+	var lastBeaconTime time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Lắng nghe Beacon
+			frame, err := v.lora.Read(beaconTimeout)
+			if err != nil {
+				// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
+				if err == device.ErrLoraTimeout {
+					// if we had a previous beacon and too long passed -> reset
+					if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
+						if v.state != StateIdle {
+							slog.Warn("Lost beacon connection, resetting to IDLE", "id", v.ID)
+						}
+						v.state = StateIdle
+						v.currentGateway = ""
+						v.assignedSlot = -1
+					}
+					continue
+				}
+				// Nếu đã Idle thì cứ tiếp tục lắng nghe
+				slog.Error("Lora read error", "err", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			// Phân loại gói tin
+			var generic map[string]any
+			if err := cbor.Unmarshal(frame, &generic); err != nil {
+				slog.Warn("Received unknown or corrupted CBOR packet", "err", err)
+				continue
+			}
+
+			msgType, ok := generic["type"].(string)
+			if !ok {
+				slog.Warn("Packet type missing")
+				continue
+			}
+
+			switch msgType {
+			case model.PacketBeacon:
+				var beacon model.BeaconMessage
+				if err := cbor.Unmarshal(frame, &beacon); err != nil {
+					// Có thể là packet Control hoặc nhiễu
+					slog.Debug("Received non-beacon frame or corrupted beacon", "err", err)
+					continue
+				}
+				slog.Info("Received beacon", "vehicle", v.ID)
+				// record last beacon time and timestamp (ms)
+				lastBeaconTime = time.Now()
+				// Xử lý logic dựa trên State và Beacon nhận được
+				v.handleBeacon(ctx, beacon)
+			case model.PacketControl:
+				var control model.ControlData
+				if err := cbor.Unmarshal(frame, &control); err != nil {
+					// Có thể là packet Control hoặc nhiễu
+					slog.Debug("Received non-control frame or corrupted control", "err", err)
+					continue
+				}
+				slog.Info("Received control", "vehicle", v.ID)
+				arduinoControl := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
+					control.Speed,
+					control.Latitude,
+					control.Longitude,
+					control.Kp,
+					control.Ki,
+					control.Kd,
+				)
+				// Forward control data to Arduino
+				if err := v.arduino.Write(arduinoControl); err != nil {
+					slog.Error("Failed to forward control to Arduino", "vehicle", v.ID, "error", err)
+				} else {
+					slog.Info("Forwarded control to Arduino", "vehicle", v.ID)
+				}
+			default:
+				slog.Debug("Received unhandled message type", "type", msgType)
+			}
+		}
+	}
+}
+
+func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
+	// Logic Roaming: Nếu gateway ID khác với hiện tại và đã có slot
+	if v.state == StateSending && v.currentGateway != "" && v.currentGateway != b.GatewayAddress {
+		slog.Info("Roaming detected, preparing to switch", "old", v.currentGateway, "new", b.GatewayAddress)
+		v.state = StateIdle // Reset về Idle để đăng ký lại với Gateway mới
+		v.assignedSlot = -1
+		// gửi lại hello ngay lập tức
+		hello := model.HelloMessage{
+			Type:      model.PacketHello,
+			VehicleID: v.ID,
+		}
+		payload, _ := cbor.Marshal(hello)
+		if err := v.lora.Write(payload); err != nil {
+			slog.Warn("Failed to send hello during roaming", "err", err)
+		} else {
+			slog.Info("Sent HELLO after roaming", "vehicle", v.ID)
+			v.state = StateJoining
+		}
+		v.currentGateway = b.GatewayAddress
+		return
+	}
+	// Luôn cập nhật Gateway ID mới nhất
+	v.currentGateway = b.GatewayAddress
+
+	switch v.state {
+	case StateIdle:
+		slog.Info("Received Beacon (Idle), preparing to send Hello", "gw", b.GatewayAddress)
+
+		// use sleepUntilRegisterWindow to compensate timing
+		if ok := v.sleepUntilRegisterWindow(ctx, b); !ok {
+			return
+		}
+
+		// Re-check: maybe beacon or another goroutine assigned slot
+		if v.assignedSlot != -1 {
+			// already have slot -> go to sending
+			v.state = StateSending
+			slog.Info("Already assigned slot while waiting, state -> SENDING", "vehicle", v.ID, "slot", v.assignedSlot)
+			return
+		}
+
+		// Gửi Hello
+		msg := model.HelloMessage{
+			Type:      model.PacketHello,
+			VehicleID: v.ID,
+		}
+		payload, _ := cbor.Marshal(msg)
+		if err := v.lora.Write(payload); err != nil {
+			slog.Warn("Failed to write Hello", "err", err)
+		} else {
+			v.state = StateJoining
+			slog.Info("Sent Hello, state -> JOINING", "id", v.ID)
+		}
+
+	case StateJoining:
+		// Trạng thái CHUẨN BỊ GỬI: Kiểm tra xem trong Beacon mới có Slot cho mình chưa
+		if slot, ok := b.SlotMap[v.ID]; ok {
+			v.assignedSlot = slot
+			v.state = StateSending
+			slog.Info("Joined successfully state -> SENDING", "vehicle", v.ID, "slot", slot)
+			// Sau khi nhận beacon (T0), thực hiện TDMA gửi ngay trong chu kỳ này
+			go v.performTDMA(ctx, b)
+		} else {
+			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
+			slog.Warn("Waiting for slot assignment...", "id", v.ID)
+
+			// use sleepUntilRegisterWindow for retry
+			if ok := v.sleepUntilRegisterWindow(ctx, b); !ok {
+				return
+			}
+
+			// Re-check prior to sending
+			if v.assignedSlot != -1 {
+				slog.Info("Slot assigned during wait, skip resend", "vehicle", v.ID, "slot", v.assignedSlot)
+				v.state = StateSending
+				// start TDMA for this cycle if possible
+				go v.performTDMA(ctx, b)
+				return
+			}
+
+			msg := model.HelloMessage{Type: model.PacketHello, VehicleID: v.ID}
+			payload, _ := cbor.Marshal(msg)
+			if err := v.lora.Write(payload); err != nil {
+				slog.Warn("Failed to write Hello (retry)", "err", err)
+			} else {
+				slog.Info("Resent Hello (JOINING)", "vehicle", v.ID)
+			}
+			// State vẫn là Joining
+		}
+
+	case StateSending:
+		// Trạng thái GỬI: Kiểm tra lại SlotMap xem còn được cấp phép không
+		if slot, ok := b.SlotMap[v.ID]; ok {
+			v.assignedSlot = slot // Cập nhật slot nếu Gateway thay đổi
+			go v.performTDMA(ctx, b)
+		} else {
+			slog.Warn("Lost slot allocation, returning to IDLE", "id", v.ID)
+			v.state = StateIdle
+			v.assignedSlot = -1
+		}
+	}
+}
+
+// performTDMA now accepts ctx and uses sleepUntilSlot to schedule transmission
+func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage) {
+	if v.assignedSlot < 1 {
+		slog.Warn("Invalid slot, skipping TDMA", "vehicle", v.ID, "slot", v.assignedSlot)
+		return
+	}
+
+	// compute 0-based index
+	slotIndex := v.assignedSlot - 1
+
+	// Wait until the slot (potentially current or next cycle)
+	if ok := v.sleepUntilSlot(ctx, b, slotIndex); !ok {
+		// skip if context canceled or timing not possible
+		return
+	}
+
+	// Re-check assigned slot hasn't changed
+	if v.assignedSlot-1 != slotIndex {
+		slog.Info("Assigned slot changed before transmit, skipping", "vehicle", v.ID, "slotIndex", slotIndex, "currentSlot", v.assignedSlot)
+		return
+	}
+
+	// Lấy dữ liệu mới nhất
+	v.mu.Lock()
+	data := v.lastTelemetry
+	v.mu.Unlock()
+
+	// Đóng gói
+	pkt := model.VehicleData{
+		Type:        model.PacketTelemetry,
+		VehicleID:   v.ID,
+		Latitude:    data.Latitude,
+		Longitude:   data.Longitude,
+		CurrentHead: data.CurrentHead,
+		TargetHead:  data.TargetHead,
+		LeftSpeed:   data.LeftSpeed,
+		RightSpeed:  data.RightSpeed,
+	}
+	payload, _ := cbor.Marshal(pkt)
+
+	// Gửi và đo RTT to update estOWD
+	start := time.Now()
+	if err := v.lora.Write(payload); err != nil {
+		slog.Warn("Failed to send telemetry", "err", err)
+		return
+	}
+	// // we don't have ack mechanism here; as approximation, measure local write duration
+	// elapsed := time.Since(start)
+	// // update estOWD as EWMA of previous and elapsed/2
+	// v.owdMu.Lock()
+	// prev := v.estOWDms
+	// meas := int64(elapsed.Milliseconds() / 2)
+	// alpha := 0.7
+	// v.estOWDms = int64(math.Round(alpha*float64(prev) + (1.0-alpha)*float64(meas)))
+	// v.owdMu.Unlock()
+
+	// we cannot measure true OWD without ACK; use conservative EWMA & bounds
+	elapsed := time.Since(start)
+	meas := int64(elapsed.Milliseconds() / 2)
+	if meas < 10 {
+		meas = 10
+	}
+	if meas > 2000 {
+		meas = 2000
+	}
+	// alpha smaller to reduce oscillation
+	alpha := 0.3
+	v.owdMu.Lock()
+	prev := v.estOWDms
+	v.estOWDms = int64(math.Round(alpha*float64(meas) + (1.0-alpha)*float64(prev)))
+	v.owdMu.Unlock()
+
+	slog.Debug("Sent Telemetry (TDMA)",
+		"vehicle", v.ID,
+		"slot", v.assignedSlot,
+		"lat", data.Latitude,
+		"lon", data.Longitude,
+		"estOWDms", v.estOWDms,
+	)
+}
+
+// sleepUntilRegisterWindow sleeps until the appropriate time to send HELLO
+// It uses NextCycleStart and regStartOffset logic and compensates for estimated one-way delay
+func (v *Vehicle) sleepUntilRegisterWindow(ctx context.Context, b model.BeaconMessage) bool {
+	cycleMs := int64(b.CycleDurationMs)
+	regWindowMs := int64(b.RegisterWindowMs)
+	regStartOffset := cycleMs - regWindowMs
+
+	// compute register window start for the next cycle
+	regStartMs := b.NextCycleStart + regStartOffset
+
+	// estimate one-way delay
+	v.owdMu.Lock()
+	estOWD := v.estOWDms
+	v.owdMu.Unlock()
+
+	// safety margin and minimal prep time
+	const safetyMs = int64(60)
+	const minPrepMs = int64(40)
+
+	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+
+	// target time to start transmitting so arrival inside window
+	targetTxMs := regStartMs - estOWD - safetyMs
+	sleepMs := targetTxMs - nowMs
+
+	if sleepMs <= 0 {
+		// maybe still possible to send (small backoff) if we are within window
+		regEndMs := regStartMs + regWindowMs
+		arrivalIfNow := nowMs + estOWD
+		// if arrival before end and we have time to prepare -> do short random backoff
+		if arrivalIfNow+minPrepMs < regEndMs {
+			backoff := rand.Int63n(int64(math.Min(float64(regWindowMs/4), 200)))
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(backoff) * time.Millisecond):
+				return true
+			}
+		}
+		// else skip to next cycle
+		nextRegStart := regStartMs + cycleMs
+		sleepMs = nextRegStart - nowMs
+	}
+
+	if sleepMs > 0 {
+		timer := time.NewTimer(time.Duration(sleepMs) * time.Millisecond)
+		// defer timer.Stop()
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			// IMPORTANT: re-check state/assignedSlot/last received beacon timestamp
+			if v.state == StateJoining && v.assignedSlot != -1 {
+				// slot already assigned while sleeping -> do NOT resend
+				return true
+			}
+			return true
+		}
+	}
+	return true
+}
+
+// sleepUntilSlot sleeps until the correct slot start (supports current or next cycle)
+func (v *Vehicle) sleepUntilSlot(ctx context.Context, b model.BeaconMessage, slotIndex int) bool {
+	// slotIndex assumed 0-based
+	slotDurMs := int64(b.SlotDurationMs)
+	guardMs := int64(b.GuardTimeMs)
+	oneSlotMs := slotDurMs + guardMs
+	// cycleMs := int64(b.CycleDurationMs)
+
+	// compute candidate starts: current cycle and next cycle
+	candidates := []int64{b.CycleStart, b.NextCycleStart}
+
+	v.owdMu.Lock()
+	estOWD := v.estOWDms
+	v.owdMu.Unlock()
+
+	const safetyMs = int64(40)
+	const minPrepMs = int64(20)
+
+	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+
+	for _, base := range candidates {
+		slotStart := base + guardMs + int64(slotIndex)*oneSlotMs
+		// target transmit so arrival at slotStart
+		targetTxMs := slotStart - estOWD - safetyMs
+		sleepMs := targetTxMs - nowMs
+		if sleepMs <= 0 {
+			// maybe still possible if arrival before slot end
+			slotEnd := slotStart + slotDurMs
+			arrivalIfNow := nowMs + estOWD
+			if arrivalIfNow+minPrepMs < slotEnd {
+				// tiny random backoff to avoid collisions
+				backoff := rand.Int63n(50)
+				select {
+				case <-ctx.Done():
+					return false
+				case <-time.After(time.Duration(backoff) * time.Millisecond):
+					return true
+				}
+			}
+			// else try next candidate
+			continue
+		}
+		// wait until targetTxMs
+		timer := time.NewTimer(time.Duration(sleepMs) * time.Millisecond)
+		// defer timer.Stop()
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			// IMPORTANT: re-check state/assignedSlot/last received beacon timestamp
+			if v.state == StateJoining && v.assignedSlot != -1 {
+				// slot already assigned while sleeping -> do NOT resend
+				return false
+			}
+			return true
+		}
+	}
+	// if nothing matched, wait a short time then return false to let caller skip
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(100 * time.Millisecond):
+		return false
+	}
+}
+
+```
+
 - /internal/core/server.go
 ```go
 // Package core implements the Fog server — registry, WebSocket, telemetry & control APIs.
@@ -376,7 +1462,10 @@ import (
 
 	"LoraFog/internal/database"
 	"LoraFog/internal/model"
+	// "github.com/gorilla/websocket"
 )
+
+// var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 // Session đại diện cho một kết nối Vehicle đang hoạt động
 type Session struct {
@@ -394,6 +1483,8 @@ type Server struct {
 	database   *database.ServerDB // Giả lập Database
 	httpClient *http.Client
 	// httpServer *http.Server
+	// mutexWS    sync.Mutex
+	// clients    map[*websocket.Conn]bool
 
 	mutex        sync.Mutex
 	sessions     map[string]*Session     // Map: VehicleID -> Session
@@ -424,17 +1515,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Khởi động HTTP Server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/register", s.handleRegister)
-	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
+	mux.HandleFunc("/register", s.handleRegister)
+	mux.HandleFunc("/telemetry", s.handleTelemetry)
+	mux.HandleFunc("/command", s.handleControl)
+	// mux.HandleFunc("/ws", s.handleWS)
 
 	server := &http.Server{Addr: s.Address, Handler: mux}
 
-	// if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-	// 	slog.Error("Server HTTP failed to start", "error", err)
-	// }
-	// slog.Info("Server started", "address", s.Address)
-	// return nil
-	//
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			slog.Error("Server HTTP failed to start", "error", err)
@@ -460,6 +1547,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info(
+		"Server received register",
+		"gateway", req.GatewayAddress,
+		"vehicle", req.VehicleID,
+	)
+
 	if req.VehicleID == "" || req.GatewayAddress == "" {
 		http.Error(w,
 			"vehicle and gateway required",
@@ -468,39 +1561,37 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mutex.Lock()
 	// 1. Logic Roaming/Trùng Session
+	var oldGw string
+	var oldSlot int
+	s.mutex.Lock()
 	if oldSes, ok := s.sessions[req.VehicleID]; ok {
-		// Release old slot and update DB to clear gateway
+		oldGw = oldSes.GatewayAddress
+		oldSlot = oldSes.Slot
+
 		delete(s.sessions, req.VehicleID)
-		if oldSes.GatewayAddress != req.GatewayAddress {
-			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
-			// Update DB to clear gateway for vehicle (safeguard)
-			go func(vehicle, oldgw string) {
-				_ = s.database.UpdateVehicleGateway(
-					context.Background(),
-					vehicle,
-					"",
-				)
-				// push update to old gateway
-				go s.pushSlotUpdateToGateway(oldgw)
-			}(req.VehicleID, oldSes.GatewayAddress)
-			slog.Info(
-				"Roaming: cleared old session",
-				"vehicle", req.VehicleID,
-				"old_gw", oldSes.GatewayAddress,
-			)
-		} else {
-			// re-registration same gw: release slot so we can assign afresh
-			s.releaseSlot(oldSes.GatewayAddress, oldSes.Slot)
-			slog.Info(
-				"Re-registration: old slot released",
-				"vehicle", req.VehicleID,
-				"gw", req.GatewayAddress,
-			)
-		}
+		s.releaseSlot(oldGw, oldSlot)
 	}
+	s.mutex.Unlock()
+
+	// 2. Nếu có session cũ → unregister DB + push update
+	if oldGw != "" {
+		// Update DB to clear gateway for vehicle (safeguard)
+		_ = s.database.UpdateVehicleGateway(
+			context.Background(),
+			req.VehicleID,
+			"",
+		)
+		s.pushSlotUpdateToGateway(oldGw)
+		slog.Info(
+			"Roaming: cleared old session",
+			"vehicle", req.VehicleID,
+			"old_gw", oldGw,
+		)
+	}
+
 	// 2. Cấp Slot mới tại Gateway mới
+	s.mutex.Lock()
 	newSlot := s.assignNewSlot(req.GatewayAddress)
 	if newSlot == -1 {
 		s.mutex.Unlock()
@@ -571,6 +1662,12 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
+	slog.Info(
+		"Server received telemetry",
+		"vehicle", telem.VehicleID,
+		"lat", telem.Latitude,
+		"lon", telem.Longitude,
+	)
 
 	s.mutex.Lock()
 	if ses, ok := s.sessions[telem.VehicleID]; ok {
@@ -584,7 +1681,16 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					3*time.Second,
 				)
 				defer cancel()
-				body, _ := json.Marshal(t)
+				vehicleApp := model.VehicleApp{
+					VehicleID:   t.VehicleID,
+					Latitude:    t.Latitude,
+					Longitude:   t.Longitude,
+					CurrentHead: t.CurrentHead,
+					TargetHead:  t.TargetHead,
+					LeftSpeed:   t.LeftSpeed,
+					RightSpeed:  t.RightSpeed,
+				}
+				body, _ := json.Marshal(vehicleApp)
 				req, err := http.NewRequestWithContext(ctx,
 					"POST",
 					"http://"+s.AppAddress+"/api/telemetry",
@@ -601,6 +1707,8 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				_ = resp.Body.Close()
+				// s.broadcast(string(body))
+				// slog.Info("broadcast to websocket")
 			}(telem)
 		}
 	} else {
@@ -610,6 +1718,66 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	s.mutex.Unlock()
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() { _ = r.Body.Close() }()
+
+	var controlApp model.ControlApp
+	if err := json.NewDecoder(r.Body).Decode(&controlApp); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+	slog.Info("Server received control")
+
+	if controlApp.VehicleID == "" {
+		http.Error(w,
+			"vehicle id required",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	gatewayID, _ := s.database.GetVehicleGateway(context.Background(), controlApp.VehicleID)
+	if gatewayID == "" {
+		slog.Error("Control cannot reach because vehicle not belong to any gateway")
+		return
+	}
+
+	controlData := model.ControlData{
+		Type:      model.PacketControl,
+		VehicleID: controlApp.VehicleID,
+		Speed:     controlApp.Speed,
+		Latitude:  controlApp.Latitude,
+		Longitude: controlApp.Longitude,
+		Kp:        controlApp.Kp,
+		Ki:        controlApp.Ki,
+		Kd:        controlApp.Kd,
+	}
+	go func(c model.ControlData) {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			3*time.Second,
+		)
+		defer cancel()
+		body, _ := json.Marshal(c)
+		req, err := http.NewRequestWithContext(ctx,
+			"POST",
+			"http://"+gatewayID+"/control",
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			slog.Warn("failed build forward request", "err", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			slog.Warn("forward control failed", "err", err)
+			return
+		}
+		_ = resp.Body.Close()
+	}(controlData)
 }
 
 // sweeper: Quét các Session đã hết hạn (TTL Expired)
@@ -692,7 +1860,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	}
 	s.mutex.Unlock()
 
-	// Gửi POST xuống Gateway /api/update_beacon
+	// Gửi POST xuống Gateway /update_beacon
 	body, _ := json.Marshal(slotMap)
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -703,7 +1871,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	// Lưu ý: Giả định gwAddr là địa chỉ HTTP (ví dụ: localhost:8081)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+gwAddr+"/api/update_beacon",
+		"http://"+gwAddr+"/update_beacon",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -733,533 +1901,41 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	}
 }
 
-```
-
-- /internal/core/system.go
-```go
-// Package core orchestrates system startup and shutdown.
-package core
-
-import (
-	"context"
-	"fmt"
-	"log/slog"
-	"os"
-	"sync"
-	"time"
-
-	"LoraFog/internal/database"
-	"LoraFog/internal/device"
-	"LoraFog/internal/model"
-	"LoraFog/internal/util"
-
-	"gopkg.in/yaml.v3"
-)
-
-// System manages Fog server, gateways, and vehicles.
-type System struct {
-	configPath   string
-	config       *model.Config
-	server       *Server
-	gateways     []*Gateway
-	vehicles     []*Vehicle
-	arduinos     []*device.Arduino
-	serverDB     *database.ServerDB
-	socatManager *util.SocatManager
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-// NewSystem constructs a System from YAML configuration.
-func NewSystem(path string) (*System, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg model.Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-
-	sys := &System{
-		configPath:   path,
-		config:       &cfg,
-		socatManager: util.NewSocatManager(),
-	}
-
-	for _, vs := range cfg.VirtualSerials {
-		if err := sys.socatManager.CreatePair(
-			vs.Left,
-			vs.Right,
-		); err != nil {
-			slog.Error("Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
-		}
-	}
-	time.Sleep(300 * time.Millisecond)
-
-	// 1. Mở kết nối DB ở đây (trong main)
-	dsn := "admin:admin@tcp(localhost:3006)/boat"
-	sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
-	if err != nil {
-		slog.Error("Database established fail", "error", err)
-	} else {
-		slog.Info("Database established success")
-	}
-	if cfg.Server.Address != "" {
-		sys.server = NewServer(
-			cfg.Server.Address,
-			cfg.Server.AppAddress,
-			sys.serverDB,
-		)
-	}
-	for _, g := range cfg.Gateways {
-		sys.gateways = append(sys.gateways, NewGateway(
-			g.Address,
-			g.ServerAddress,
-			g.LoraDevice,
-			g.LoraBaud,
-		))
-	}
-	for _, v := range cfg.Vehicles {
-		sys.vehicles = append(sys.vehicles, NewVehicle(
-			v.ID,
-			v.LoraDevice,
-			v.LoraBaud,
-			v.ArduinoDevice,
-			v.ArduinoBaud,
-		))
-	}
-	for _, a := range cfg.Arduinos {
-		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Device, a.Baud))
-	}
-
-	return sys, nil
-}
-
-// Start launches all system components.
-func (s *System) Start(ctx context.Context) error {
-	if s.server == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
-		return fmt.Errorf("no active components")
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-
-	if s.server != nil {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			_ = s.server.Start(ctx)
-		}()
-	}
-	for _, gw := range s.gateways {
-		_ = gw.Start(ctx)
-	}
-	for _, vh := range s.vehicles {
-		_ = vh.Start(ctx)
-	}
-	for _, ino := range s.arduinos {
-		s.wg.Add(1)
-		go func(ino *device.Arduino) {
-			defer s.wg.Done()
-			stop := make(chan struct{})
-			go func() {
-				<-ctx.Done()
-				close(stop)
-			}()
-			_ = ino.StartSimulation(stop)
-		}(ino)
-	}
-	return nil
-}
-
-// Shutdown gracefully stops all components.
-func (s *System) Shutdown() {
-	slog.Info("System is shutting down...")
-	if s.cancel != nil {
-		s.cancel()
-	}
-	for _, gw := range s.gateways {
-		gw.Stop()
-	}
-	for _, vh := range s.vehicles {
-		vh.Stop()
-	}
-	for _, ino := range s.arduinos {
-		_ = ino.Close()
-	}
-	// if s.server != nil {
-	// 	_ = s.server.Stop()
-	// }
-	if s.socatManager != nil {
-		s.socatManager.Cleanup()
-	}
-	s.wg.Wait()
-	slog.Info("Shutdown complete")
-}
-
-```
-
-- /internal/core/vehicle.go
-```go
-// Package core implements the Vehicle agent
-// responsible for collecting telemetry from Arduino devices
-// and sending CBOR-encoded data via LoRa.
-package core
-
-import (
-	"context"
-	"log/slog"
-	"math/rand"
-	"sync"
-	"time"
-
-	"LoraFog/internal/device"
-	"LoraFog/internal/model"
-
-	"github.com/fxamacker/cbor/v2"
-)
-
-// VehicleState định nghĩa trạng thái của xe
-type VehicleState int
-
-const (
-	StateIdle    VehicleState = 0 // Chờ Beacon, chưa có slot
-	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
-	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
-)
-
-// Vehicle là đại diện cho thiết bị thuyền/xe
-type Vehicle struct {
-	ID      string
-	lora    *device.Lora
-	arduino *device.Arduino // Có thể nil nếu dùng dữ liệu giả lập
-
-	state          VehicleState
-	currentGateway string
-	assignedSlot   int
-
-	// Cache dữ liệu telemetry mới nhất từ Arduino
-	mu            sync.Mutex
-	lastTelemetry model.ArduinoData
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-// NewVehicle tạo một Vehicle mới
-func NewVehicle(
-	id string,
-	loraDev string, loraBaud int,
-	arduinoDev string, arduinoBaud int,
-) *Vehicle {
-	lora := device.NewLora(loraDev, loraBaud)
-	v := &Vehicle{
-		ID:           id,
-		lora:         lora,
-		state:        StateIdle,
-		assignedSlot: -1,
-	}
-	if arduinoDev != "" {
-		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
-	}
-	return v
-}
-
-func (v *Vehicle) Start(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	v.cancel = cancel
-
-	slog.Info("Vehicle starting", "id", v.ID)
-
-	// 1. Goroutine đọc Arduino liên tục để update lastTelem
-	if v.arduino != nil {
-		v.wg.Add(1)
-		go v.arduinoLoop(ctx)
-	}
-
-	// 2. Goroutine chính: LoRa Loop (State Machine)
-	v.wg.Add(1)
-	go v.loraLoop(ctx)
-
-	return nil
-}
-
-func (v *Vehicle) Stop() {
-	if v.cancel != nil {
-		v.cancel()
-	}
-	if v.lora != nil {
-		if err := v.lora.Close(); err != nil {
-			slog.Warn("Failed to close LoRa device", "error", err)
-		}
-	}
-	if v.arduino != nil {
-		if err := v.arduino.Close(); err != nil {
-			slog.Warn("Failed to close Arduino device", "error", err)
-		}
-	}
-	v.wg.Wait()
-	slog.Info("Vehicle stopped", "id", v.ID)
-}
-
-// arduinoLoop đọc dữ liệu từ Arduino/Simulator
-func (v *Vehicle) arduinoLoop(ctx context.Context) {
-	defer v.wg.Done()
-	dataCh := make(chan model.ArduinoData, 5)
-	stop, err := v.arduino.Read(dataCh)
-	if err != nil {
-		slog.Warn("Arduino.Read returned error", "err", err)
-		return
-	}
-	defer stop()
-
-	// Khởi tạo data giả nếu arduino nil
-	if v.arduino == nil {
-		v.mu.Lock()
-		v.lastTelemetry = model.ArduinoData{
-			Latitude:    21.027 + rand.Float64()*0.001,
-			Longitude:   105.835 + rand.Float64()*0.001,
-			CurrentHead: rand.Int63n(361),
-			TargetHead:  rand.Int63n(361),
-			LeftSpeed:   1000 + rand.Int63n(1000),
-			RightSpeed:  1000 + rand.Int63n(1000),
-		}
-		v.mu.Unlock()
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case data, ok := <-dataCh:
-			if !ok {
-				return
-			}
-			v.mu.Lock()
-			v.lastTelemetry = data
-			v.mu.Unlock()
-		}
-	}
-}
-
-// loraLoop là State Machine chính của Vehicle
-func (v *Vehicle) loraLoop(ctx context.Context) {
-	defer v.wg.Done()
-
-	// Sử dụng giá trị mặc định cho timeout chờ beacon (ví dụ: 5 giây)
-	beaconTimeout := 5 * time.Second
-	var lastBeaconTime time.Time
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// Lắng nghe Beacon
-			frame, err := v.lora.Read(beaconTimeout)
-			if err != nil {
-				// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
-				// // timeout handling
-				if err == device.ErrLoraTimeout {
-					// if we had a previous beacon and too long passed -> reset
-					if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
-						if v.state != StateIdle {
-							slog.Warn("Lost beacon connection, resetting to IDLE", "id", v.ID)
-						}
-						v.state = StateIdle
-						v.currentGateway = ""
-						v.assignedSlot = -1
-					}
-					continue
-				}
-				// Nếu đã Idle thì cứ tiếp tục lắng nghe
-				slog.Error("Lora read error", "err", err)
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			var beacon model.BeaconMessage
-			if err := cbor.Unmarshal(frame, &beacon); err != nil {
-				// Có thể là packet Control hoặc nhiễu
-				slog.Debug("Received non-beacon frame or corrupted beacon", "err", err)
-				continue
-			}
-
-			// record last beacon time and timestamp (ms)
-			lastBeaconTime = time.Now()
-
-			// Xử lý logic dựa trên State và Beacon nhận được
-			v.handleBeacon(ctx, beacon)
-		}
-	}
-}
-
-func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
-	// Logic Roaming: Nếu gateway ID khác với hiện tại và đã có slot
-	if v.state == StateSending && v.currentGateway != "" && v.currentGateway != b.GatewayAddress {
-		slog.Info("Roaming detected, preparing to switch", "old", v.currentGateway, "new", b.GatewayAddress)
-		v.state = StateIdle // Reset về Idle để đăng ký lại với Gateway mới
-		v.assignedSlot = -1
-		// gửi lại hello ngay lập tức
-		hello := model.HelloMessage{Type: "hello", VehicleID: v.ID}
-		payload, _ := cbor.Marshal(hello)
-		if err := v.lora.Write(payload); err != nil {
-			slog.Warn("Failed to send hello during roaming", "err", err)
-		} else {
-			slog.Info("Sent HELLO after roaming", "vehicle", v.ID)
-			v.state = StateJoining
-		}
-		v.currentGateway = b.GatewayAddress
-		return
-	}
-	// Luôn cập nhật Gateway ID mới nhất
-	v.currentGateway = b.GatewayAddress
-
-	switch v.state {
-	case StateIdle:
-		slog.Info("Received Beacon (Idle), preparing to send Hello", "gw", b.GatewayAddress)
-
-		// Tính thời gian đợi đến Register Window
-		cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
-		regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
-		regStartOffset := cycleDuration - regWindow
-
-		// Thời gian ngủ: Bằng độ dài chu kỳ - thời điểm bắt đầu Register Window + delay ngẫu nhiên nhỏ
-		// Ví dụ: Chu kỳ 2000ms, Register Window 300ms. regStartOffset = 1700ms.
-		// Time to sleep = 1700ms + (0-150ms)
-		// timeToSleep := regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond
-		// time.Sleep(timeToSleep)
-		// Calculate actual offset between local time and beacon timestamp (ms)
-		now := time.Now().UnixNano() / int64(time.Millisecond)
-		delta := now - b.Timestamp
-		// time until regStart since now = regStartOffset - delta
-		sleep := regStartOffset - time.Duration(delta)*time.Millisecond
-		if sleep < 0 {
-			// if we are already in/after reg window, send soon (small random backoff)
-			sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(sleep):
-		}
-
-		// Gửi Hello
-		msg := model.HelloMessage{Type: "hello", VehicleID: v.ID}
-		payload, _ := cbor.Marshal(msg)
-		if err := v.lora.Write(payload); err != nil {
-			slog.Warn("Failed to write Hello", "err", err)
-		} else {
-			v.state = StateJoining
-			slog.Info("Sent Hello, state -> JOINING", "id", v.ID)
-		}
-	case StateJoining:
-		// Trạng thái CHUẨN BỊ GỬI: Kiểm tra xem trong Beacon mới có Slot cho mình chưa
-		if slot, ok := b.SlotMap[v.ID]; ok {
-			v.assignedSlot = slot
-			v.state = StateSending
-			// slog.Info("Joined successfully", "slot", slot, "state -> SENDING")
-			// Sau khi nhận beacon (T0), thực hiện TDMA gửi ngay trong chu kỳ này
-			v.performTDMA(b)
-		} else {
-			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
-			slog.Warn("Waiting for slot assignment...", "id", v.ID)
-
-			cycleDuration := time.Duration(b.CycleDurationMs) * time.Millisecond
-			regWindow := time.Duration(b.RegisterWindowMs) * time.Millisecond
-			regStartOffset := cycleDuration - regWindow
-			// regStartOffset := cycleDuration - time.Duration(b.RegisterWindowMs)*time.Millisecond
-
-			// Ngủ đến Register Window tiếp theo
-			// time.Sleep(regStartOffset + time.Duration(rand.Int63n(b.RegisterWindowMs/2))*time.Millisecond)
-
-			now := time.Now().UnixNano() / int64(time.Millisecond)
-			delta := now - b.Timestamp
-			sleep := regStartOffset - time.Duration(delta)*time.Millisecond
-			if sleep < 0 {
-				sleep = time.Duration(rand.Int63n(int64(regWindow / 4)))
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(sleep):
-			}
-
-			msg := model.HelloMessage{Type: "hello", VehicleID: v.ID}
-			payload, _ := cbor.Marshal(msg)
-			if err := v.lora.Write(payload); err != nil {
-				slog.Warn("Failed to write Hello (retry)", "err", err)
-			} else {
-				slog.Info("Resent Hello (JOINING)", "vehicle", v.ID)
-			}
-			// State vẫn là Joining
-		}
-
-	case StateSending:
-		// Trạng thái GỬI: Kiểm tra lại SlotMap xem còn được cấp phép không
-		if slot, ok := b.SlotMap[v.ID]; ok {
-			v.assignedSlot = slot // Cập nhật slot nếu Gateway thay đổi
-			v.performTDMA(b)
-		} else {
-			slog.Warn("Lost slot allocation, returning to IDLE", "id", v.ID)
-			v.state = StateIdle
-			v.assignedSlot = -1
-		}
-	}
-}
-
-// performTDMA tính toán thời gian ngủ và gửi Telemetry đúng Slot
-func (v *Vehicle) performTDMA(b model.BeaconMessage) {
-	// Tính toán thời điểm gửi: (SlotIndex-1) * (SlotDur + Guard)
-	// SlotIndex 1: (1-1)*... = 0ms. Gửi ngay. (Đây là cách tính đơn giản)
-	// SlotIndex n: (n-1) * (SlotDur + Guard)
-
-	slotIndex := max(0, v.assignedSlot-1)
-	oneSlot := time.Duration(b.SlotDurationMs)*time.Millisecond + time.Duration(b.GuardTimeMs)*time.Millisecond
-	slotTimeFromStart := time.Duration(slotIndex) * oneSlot
-
-	// Calculate delta between now and beacon timestamp
-	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
-	deltaMs := nowMs - b.Timestamp
-	sleep := slotTimeFromStart - time.Duration(deltaMs)*time.Millisecond
-	if sleep < 0 {
-		// if we missed slot, do not block; wait next cycle
-		slog.Debug(
-			"Missed slot timing, skipping this cycle",
-			"vehicle", v.ID, "slot", v.assignedSlot)
-		return
-	}
-
-	// Ngủ đến đúng slot
-	// time.Sleep(slotTimeFromStart)
-	time.Sleep(sleep)
-
-	// Lấy dữ liệu mới nhất
-	v.mu.Lock()
-	data := v.lastTelemetry
-	v.mu.Unlock()
-
-	// Đóng gói
-	pkt := model.VehicleData{
-		Type:        model.PacketTelemetry,
-		VehicleID:   v.ID,
-		Latitude:    data.Latitude,
-		Longitude:   data.Longitude,
-		CurrentHead: data.CurrentHead,
-		TargetHead:  data.TargetHead,
-		LeftSpeed:   data.LeftSpeed,
-		RightSpeed:  data.RightSpeed,
-	}
-	payload, _ := cbor.Marshal(pkt)
-
-	// Gửi
-	if err := v.lora.Write(payload); err != nil {
-		slog.Warn("Failed to send telemetry", "err", err)
-	} else {
-		slog.Debug("Sent Telemetry (TDMA)", "slot", v.assignedSlot)
-	}
-}
+// // handleWS upgrades HTTP to websocket and registers the client for broadcasts.
+// func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+// 	conn, err := upgrader.Upgrade(w, r, nil)
+// 	if err != nil {
+// 		return
+// 	}
+// 	s.mutexWS.Lock()
+// 	s.clients[conn] = true
+// 	s.mutexWS.Unlock()
+//
+// 	go func() {
+// 		defer func() {
+// 			s.mutexWS.Lock()
+// 			delete(s.clients, conn)
+// 			s.mutexWS.Unlock()
+// 			if err := conn.Close(); err != nil {
+// 				slog.Error("Failed to close websocket", "error", err)
+// 			}
+// 		}()
+// 		for {
+// 			if _, _, err := conn.ReadMessage(); err != nil {
+// 				break
+// 			}
+// 		}
+// 	}()
+// }
+//
+// // broadcast sends a message to all connected websocket clients.
+// func (s *Server) broadcast(msg string) {
+// 	s.mutexWS.Lock()
+// 	defer s.mutexWS.Unlock()
+// 	for c := range s.clients {
+// 		_ = c.WriteMessage(websocket.TextMessage, []byte(msg))
+// 	}
+// }
 
 ```
 
@@ -1284,6 +1960,14 @@ import (
 	"LoraFog/internal/model"
 
 	"github.com/fxamacker/cbor/v2"
+)
+
+const (
+	// Thông số TDMA cố định
+	CycleDuration    = 10000 * time.Millisecond
+	SlotDurationMs   = int64(2000)
+	GuardTimeMs      = int64(500)
+	RegisterWindowMs = int64(5000)
 )
 
 // Gateway là đại diện cho thiết bị Gateway LoRaWAN
@@ -1316,18 +2000,22 @@ func NewGateway(
 
 // Start khởi động các tiến trình của Gateway
 func (g *Gateway) Start(ctx context.Context) error {
+	// slog.Warn(">>> ENTER Gateway.Start() <<<")
 	ctx, cancel := context.WithCancel(ctx)
 	g.cancel = cancel
 
 	// 1. Khởi động HTTP Server để nhận lệnh từ Server (Control & Update Beacon)
+	// slog.Warn(">>> BEFORE startHTTPServer <<<")
 	g.wg.Add(1)
 	go g.startHTTPServer(ctx)
 
 	// 2. Khởi động vòng lặp phát Beacon
+	// slog.Warn(">>> BEFORE beaconLoop <<<")
 	g.wg.Add(1)
 	go g.beaconLoop(ctx)
 
 	// 3. Khởi động vòng lặp lắng nghe Uplink (Hello & Telemetry)
+	// slog.Warn(">>> BEFORE uplinkLoop <<<")
 	g.wg.Add(1)
 	go g.uplinkLoop(ctx)
 
@@ -1359,7 +2047,8 @@ func (g *Gateway) startHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
 
 	// Endpoint nhận danh sách Slot Map mới từ Server
-	mux.HandleFunc("/api/update_beacon", g.handleBeaconUpdate)
+	mux.HandleFunc("/update_beacon", g.handleBeaconUpdate)
+	mux.HandleFunc("/control", g.handleControl)
 
 	server := &http.Server{Addr: g.Address, Handler: mux}
 
@@ -1391,26 +2080,44 @@ func (g *Gateway) handleBeaconUpdate(w http.ResponseWriter, r *http.Request) {
 	g.slotMutex.Lock()
 	g.currentSlots = newMap
 	g.slotMutex.Unlock()
-	slog.Info("Beacon slots updated by Server", "count", len(newMap))
+	slog.Info("Beacon slots updated by Server",
+		"gateway", g.Address,
+		"count", len(newMap),
+	)
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleControl
+func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() { _ = r.Body.Close() }()
+	var controlJSON model.ControlData
+	if err := json.NewDecoder(r.Body).Decode(&controlJSON); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+	controlCBOR, err := cbor.Marshal(controlJSON)
+	if err != nil {
+		slog.Error("Failed to marshal beacon", "error", err)
+		return
+	}
+	if err := g.lora.Write(controlCBOR); err != nil {
+		slog.Error("Failed to write beacon to LoRa", "err", err)
+	} else {
+		slog.Info("Gateway send control", "gateway", g.Address)
+	}
 }
 
 // beaconLoop: Phát Beacon TDMA định kỳ
 func (g *Gateway) beaconLoop(ctx context.Context) {
 	defer g.wg.Done()
 	// Giả lập chu kỳ TDMA 2 giây
-	cycleDuration := 2000 * time.Millisecond
-	ticker := time.NewTicker(cycleDuration)
-
-	// Thông số TDMA cố định
-	slotDurationMs := int64(50)
-	guardTimeMs := int64(10)
-	registerWindowMs := int64(300)
+	ticker := time.NewTicker(CycleDuration)
 
 	for {
 		select {
 		case <-ctx.Done():
+			// slog.Info("CTX DEAD INSIDE BEACON LOOP")
 			ticker.Stop()
 			return
 		case t := <-ticker.C:
@@ -1420,14 +2127,18 @@ func (g *Gateway) beaconLoop(ctx context.Context) {
 			maps.Copy(slots, g.currentSlots)
 			g.slotMutex.Unlock()
 
+			cycleStart := t.UnixNano() / int64(time.Millisecond)
+			cycleDuration := int64(CycleDuration / time.Millisecond)
+			nextCycleStart := cycleStart + cycleDuration
 			beacon := model.BeaconMessage{
 				Type:             model.PacketBeacon,
 				GatewayAddress:   g.Address,
-				Timestamp:        t.UnixNano() / int64(time.Millisecond),
-				CycleDurationMs:  int64(cycleDuration / time.Millisecond),
-				SlotDurationMs:   slotDurationMs,
-				GuardTimeMs:      guardTimeMs,
-				RegisterWindowMs: registerWindowMs,
+				CycleStart:       cycleStart,
+				NextCycleStart:   nextCycleStart,
+				CycleDurationMs:  cycleDuration,
+				SlotDurationMs:   SlotDurationMs,
+				GuardTimeMs:      GuardTimeMs,
+				RegisterWindowMs: RegisterWindowMs,
 				SlotMap:          slots,
 			}
 
@@ -1441,7 +2152,7 @@ func (g *Gateway) beaconLoop(ctx context.Context) {
 			if err := g.lora.Write(payload); err != nil {
 				slog.Error("Failed to write beacon to LoRa", "err", err)
 			} else {
-				slog.Debug(
+				slog.Info(
 					"Beacon Broadcast",
 					"gateway", g.Address, "slots", len(slots),
 				)
@@ -1485,15 +2196,28 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 		}
 
 		switch msgType {
-		case "hello":
+		case model.PacketHello:
 			var hello model.HelloMessage
 			if err := cbor.Unmarshal(frame, &hello); err == nil {
 				slog.Info("Received Hello (Register)", "vehicle_id", hello.VehicleID)
 				g.postRegisterToServer(hello.VehicleID)
 			}
-		case "telemetry":
+		case model.PacketTelemetry:
 			var telemetry model.VehicleData
 			if err := cbor.Unmarshal(frame, &telemetry); err == nil {
+				// Lấy lock để đọc currentSlots
+				g.slotMutex.Lock()
+				_, exists := g.currentSlots[telemetry.VehicleID]
+				g.slotMutex.Unlock()
+
+				if !exists {
+					// Vehicle không có slot → bỏ qua telemetry
+					slog.Warn("Telemetry ignored: vehicle has no active slot",
+						"vehicle_id", telemetry.VehicleID)
+					continue
+				}
+
+				// Vehicle hợp lệ → gửi lên Server
 				slog.Debug("Received Telemetry", "vehicle_id", telemetry.VehicleID)
 				g.postTelemetryToServer(telemetry)
 			}
@@ -1508,14 +2232,14 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	reqBody := map[string]string{
-		"gateway_address": g.Address,
-		"vehicle_id":      vehicleID,
+	register := model.RegisterRequest{
+		GatewayAddress: g.Address,
+		VehicleID:      vehicleID,
 	}
-	payload, _ := json.Marshal(reqBody)
+	payload, _ := json.Marshal(register)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+g.ServerAddress+"/api/register",
+		"http://"+g.ServerAddress+"/register",
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -1532,9 +2256,12 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 		)
 		return
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
+	slog.Info(
+		"Gateway send registry",
+		"gateway", g.Address,
+		"vehicle", vehicleID,
+	)
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("Server rejected registration", "status", resp.Status)
@@ -1564,7 +2291,7 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 	body, _ := json.Marshal(data)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+g.ServerAddress+"/api/telemetry",
+		"http://"+g.ServerAddress+"/telemetry",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -1581,137 +2308,15 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 		)
 		return
 	}
-	_ = resp.Body.Close()
-}
+	defer func() { _ = resp.Body.Close() }()
 
-```
-
-- /internal/device/arduino.go
-```go
-// Package device implements ArduinoDevice for
-// reading and writing telemetry over serial
-// as well as simulation support.
-package device
-
-import (
-	"fmt"
-	"log/slog"
-	"math/rand"
-	"time"
-
-	"LoraFog/internal/model"
-)
-
-// Arduino represents a serial connection to an Arduino controller.
-type Arduino struct {
-	Device string
-	Baud   int
-	serial *Serial
-}
-
-// NewArduino creates and connects to an Arduino serial device.
-func NewArduino(dev string, baud int) *Arduino {
-	s, err := NewSerial(dev, baud)
-	if err != nil {
-		slog.Warn("failed to connect Arduino",
-			"component", "arduino", "device", dev, "error", err)
-	}
-	return &Arduino{
-		Device: dev,
-		Baud:   baud,
-		serial: s,
-	}
-}
-
-// Read starts reading Arduino telemetry in a background goroutine and pushes it into dataCh.
-// It returns a stop function that can be called to terminate the loop safely.
-func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
-	if a.serial == nil {
-		return nil, fmt.Errorf("arduino serial not initialized")
-	}
-
-	stop := make(chan struct{})
-	go func() {
-		defer close(dataCh)
-		for {
-			select {
-			case <-stop:
-				slog.Info("stopping Arduino read loop",
-					"component", "arduino", "device", a.Device)
-				return
-			default:
-			}
-
-			line, err := a.serial.ReadLine(0)
-			if err != nil {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			var d model.ArduinoData
-			if _, err := fmt.Sscanf(line, "%f,%f,%d,%d,%d,%d",
-				&d.Latitude, &d.Longitude, &d.CurrentHead,
-				&d.TargetHead, &d.LeftSpeed, &d.RightSpeed); err != nil {
-				continue
-			}
-			select {
-			case dataCh <- d:
-			default:
-			}
-		}
-	}()
-	return func() { close(stop) }, nil
-}
-
-// Write sends a single line to the Arduino serial interface.
-func (a *Arduino) Write(line string) error {
-	if a.serial == nil {
-		return fmt.Errorf("arduino serial not initialized")
-	}
-	return a.serial.WriteLine(line)
-}
-
-// StartSimulation generates synthetic telemetry data periodically for testing.
-func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	slog.Info("starting Arduino simulation",
-		"component", "arduino", "device", a.Device)
-
-	for {
-		select {
-		case <-stop:
-			slog.Info("stopping Arduino simulation",
-				"component", "arduino", "device", a.Device)
-			return nil
-		case <-ticker.C:
-			data := model.ArduinoData{
-				Latitude:    21.027 + rand.Float64()*0.001,
-				Longitude:   105.835 + rand.Float64()*0.001,
-				CurrentHead: rand.Int63n(361),
-				TargetHead:  rand.Int63n(361),
-				LeftSpeed:   1000 + rand.Int63n(1000),
-				RightSpeed:  1000 + rand.Int63n(1000),
-			}
-			line := fmt.Sprintf("%f,%f,%d,%d,%d,%d",
-				data.Latitude, data.Longitude, data.CurrentHead,
-				data.TargetHead, data.LeftSpeed, data.RightSpeed)
-
-			if err := a.Write(line); err != nil {
-				slog.Warn("failed to write simulated telemetry",
-					"component", "arduino", "device", a.Device, "error", err)
-			}
-		}
-	}
-}
-
-// Close closes the Arduino serial port safely.
-func (a *Arduino) Close() error {
-	if a.serial == nil {
-		return nil
-	}
-	return a.serial.Close()
+	slog.Info(
+		"Gateway send registry",
+		"gateway", g.Address,
+		"vehicle", data.VehicleID,
+		"lat", data.Latitude,
+		"lon", data.Longitude,
+	)
 }
 
 ```
@@ -1721,11 +2326,6 @@ func (a *Arduino) Close() error {
 // Package device implements LoraDevice, a binary (CBOR) serial communication handler.
 // It is used for LoRa links between Vehicle and Gateway.
 package device
-
-// CHANGELOG (refactor v2):
-// - Added new binary-based LoraDevice (no simulation, unlike Arduino)
-// - Uses Serial.ReadBytes() and WriteBytes() for CBOR payloads
-// - Safe close and structured logging (slog)
 
 import (
 	"encoding/binary"
@@ -1906,8 +2506,8 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 	}
 	buf := make([]byte, n)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
 
 	// 1. Thiết lập timeout cho Port trước khi đọc
 	if err := s.Port.SetReadTimeout(timeout); err != nil {
@@ -1968,6 +2568,245 @@ func (s *Serial) Close() error {
 
 ```
 
+- /internal/device/arduino.go
+```go
+// Package device implements ArduinoDevice for
+// reading and writing telemetry over serial
+// as well as simulation support.
+package device
+
+import (
+	"fmt"
+	"log/slog"
+	"math"
+	"time"
+
+	"LoraFog/internal/model"
+)
+
+// Arduino represents a serial connection to an Arduino controller.
+type Arduino struct {
+	Device string
+	Baud   int
+	serial *Serial
+}
+
+// NewArduino creates and connects to an Arduino serial device.
+func NewArduino(dev string, baud int) *Arduino {
+	s, err := NewSerial(dev, baud)
+	if err != nil {
+		slog.Warn("failed to connect Arduino",
+			"component", "arduino", "device", dev, "error", err)
+	}
+	return &Arduino{
+		Device: dev,
+		Baud:   baud,
+		serial: s,
+	}
+}
+
+// Read starts reading Arduino telemetry in a background goroutine and pushes it into dataCh.
+// It returns a stop function that can be called to terminate the loop safely.
+func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
+	if a.serial == nil {
+		return nil, fmt.Errorf("arduino serial not initialized")
+	}
+
+	stop := make(chan struct{})
+	go func() {
+		defer close(dataCh)
+		for {
+			select {
+			case <-stop:
+				slog.Info("stopping Arduino read loop",
+					"component", "arduino", "device", a.Device)
+				return
+			default:
+			}
+
+			line, err := a.serial.ReadLine(0)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			var d model.ArduinoData
+			if _, err := fmt.Sscanf(line, "%f,%f,%d,%d,%d,%d",
+				&d.Latitude, &d.Longitude, &d.CurrentHead,
+				&d.TargetHead, &d.LeftSpeed, &d.RightSpeed); err != nil {
+				continue
+			}
+			select {
+			case dataCh <- d:
+			default:
+			}
+		}
+	}()
+	return func() { close(stop) }, nil
+}
+
+// Write sends a single line to the Arduino serial interface.
+func (a *Arduino) Write(line string) error {
+	if a.serial == nil {
+		return fmt.Errorf("arduino serial not initialized")
+	}
+	return a.serial.WriteLine(line)
+}
+
+// Close closes the Arduino serial port safely.
+func (a *Arduino) Close() error {
+	if a.serial == nil {
+		return nil
+	}
+	return a.serial.Close()
+}
+
+// StartSimulation generates synthetic telemetry data periodically for testing.
+func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
+	// --- Simulation State ---
+	var (
+		latNow  = 21.027000
+		lonNow  = 105.835000
+		headNow = 0.0 // độ
+	)
+
+	// --- Server Command State ---
+	var (
+		baseSpeed = 1000.0
+		targetLat = 21.027100
+		targetLon = 105.835600
+		Kp        = 0.0
+		Ki        = 0.0
+		Kd        = 0.0
+	)
+
+	var (
+		integral float64 = 0
+		lastErr  float64 = 0
+	)
+
+	readCh := make(chan string, 10)
+
+	// Goroutine để đọc lệnh CSV server gửi xuống
+	go func() {
+		for {
+			line, err := a.serial.ReadLine(0)
+			if err != nil {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			readCh <- line
+		}
+	}()
+
+	slog.Info("starting Arduino simulation",
+		"component", "arduino", "device", a.Device)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			slog.Info("stopping Arduino simulation",
+				"component", "arduino", "device", a.Device)
+			return nil
+		case line := <-readCh:
+			// EXPECT: speed,lat,lon,Kp,Ki,Kd
+			if _, err := fmt.Sscanf(line, "%f,%f,%f,%f,%f,%f",
+				&baseSpeed, &targetLat, &targetLon, &Kp, &Ki, &Kd,
+			); err == nil {
+				slog.Info("Simulation: received new target",
+					"speed", baseSpeed, "lat", targetLat, "lon", targetLon)
+			}
+		case <-ticker.C:
+			// data := model.ArduinoData{
+			// 	Latitude:    21.027 + rand.Float64()*0.001,
+			// 	Longitude:   105.835 + rand.Float64()*0.001,
+			// 	CurrentHead: rand.Int63n(361),
+			// 	TargetHead:  rand.Int63n(361),
+			// 	LeftSpeed:   1000 + rand.Int63n(1000),
+			// 	RightSpeed:  1000 + rand.Int63n(1000),
+			// }
+			// line := fmt.Sprintf("%f,%f,%d,%d,%d,%d",
+			// 	data.Latitude, data.Longitude, data.CurrentHead,
+			// 	data.TargetHead, data.LeftSpeed, data.RightSpeed)
+			// --- 1. Tính hướng cần đến ---
+			targetHead := bearing(latNow, lonNow, targetLat, targetLon)
+
+			// --- 2. PID Steering ---
+			err := normalizeAngle(targetHead - headNow)
+			integral += err
+			derivative := err - lastErr
+			lastErr = err
+
+			turn := Kp*err + Ki*integral + Kd*derivative
+
+			// --- 3. Tính motor ---
+			left := baseSpeed + turn
+			right := baseSpeed - turn
+
+			left = clamp(left, 1000, 2000)
+			right = clamp(right, 1000, 2000)
+
+			// --- 4. Mô phỏng tàu di chuyển một chút ---
+			headNow = normalizeAngle(headNow + turn*0.1)
+			latNow += (math.Cos(deg2rad(headNow)) * 0.00001)
+			lonNow += (math.Sin(deg2rad(headNow)) * 0.00001)
+
+			// --- 5. Gửi dữ liệu như Arduino thật ---
+			line := fmt.Sprintf("%.6f,%.6f,%d,%d,%d,%d",
+				latNow, lonNow,
+				int(headNow),
+				int(targetHead),
+				int(left),
+				int(right),
+			)
+
+			if err := a.Write(line); err != nil {
+				slog.Warn("failed to write simulated telemetry",
+					"component", "arduino", "device", a.Device, "error", err)
+			}
+		}
+	}
+}
+
+func bearing(lat1, lon1, lat2, lon2 float64) float64 {
+	rad1 := deg2rad(lat1)
+	rad2 := deg2rad(lat2)
+	delta := deg2rad(lon2 - lon1)
+
+	y := math.Sin(delta) * math.Cos(rad2)
+	x := math.Cos(rad1)*math.Sin(rad2) -
+		math.Sin(rad1)*math.Cos(rad2)*math.Cos(delta)
+
+	ans := math.Atan2(y, x)
+	return normalizeAngle(rad2deg(ans))
+}
+
+func deg2rad(d float64) float64 { return d * math.Pi / 180 }
+func rad2deg(r float64) float64 { return r * 180 / math.Pi }
+
+func normalizeAngle(a float64) float64 {
+	a = math.Mod(a+360, 360)
+	if a < 0 {
+		a += 360
+	}
+	return a
+}
+
+func clamp(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+```
+
 - /internal/database/mysql.go
 ```go
 // Package database provides MySQL-backed storage for vehicle/gateway mapping.
@@ -1979,7 +2818,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
-	// _ "github.com/go-sql-driver/mysql"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type ServerDB struct {
@@ -2043,7 +2883,6 @@ func (s *ServerDB) UpdateVehicleGateway(ctx context.Context, vehicleID, gatewayI
 }
 
 // GetVehicleGateway returns gatewayId for given vehicle boatId. Returns "" if none.
-// UPDATED v2
 func (s *ServerDB) GetVehicleGateway(ctx context.Context, vehicleID string) (string, error) {
 	if s == nil || s.db == nil {
 		return "", errors.New("db not initialized")

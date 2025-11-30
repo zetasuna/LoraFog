@@ -12,11 +12,10 @@ import (
 
 	"LoraFog/internal/database"
 	"LoraFog/internal/model"
-
-	"github.com/gorilla/websocket"
+	// "github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+// var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 // Session đại diện cho một kết nối Vehicle đang hoạt động
 type Session struct {
@@ -34,7 +33,8 @@ type Server struct {
 	database   *database.ServerDB // Giả lập Database
 	httpClient *http.Client
 	// httpServer *http.Server
-	clients map[*websocket.Conn]bool
+	// mutexWS    sync.Mutex
+	// clients    map[*websocket.Conn]bool
 
 	mutex        sync.Mutex
 	sessions     map[string]*Session     // Map: VehicleID -> Session
@@ -65,11 +65,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Khởi động HTTP Server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/register", s.handleRegister)
-	mux.HandleFunc("/api/telemetry", s.handleTelemetry)
-	// mux.HandleFunc("/api/control", s.handleControl)
+	mux.HandleFunc("/register", s.handleRegister)
+	mux.HandleFunc("/telemetry", s.handleTelemetry)
 	mux.HandleFunc("/command", s.handleControl)
-	mux.HandleFunc("/ws", s.handleWS)
+	// mux.HandleFunc("/ws", s.handleWS)
 
 	server := &http.Server{Addr: s.Address, Handler: mux}
 
@@ -258,7 +257,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				_ = resp.Body.Close()
-				s.broadcast(string(body))
+				// s.broadcast(string(body))
 				// slog.Info("broadcast to websocket")
 			}(telem)
 		}
@@ -314,7 +313,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		body, _ := json.Marshal(c)
 		req, err := http.NewRequestWithContext(ctx,
 			"POST",
-			"http://"+gatewayID+"/api/control",
+			"http://"+gatewayID+"/control",
 			bytes.NewReader(body),
 		)
 		if err != nil {
@@ -411,7 +410,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	}
 	s.mutex.Unlock()
 
-	// Gửi POST xuống Gateway /api/update_beacon
+	// Gửi POST xuống Gateway /update_beacon
 	body, _ := json.Marshal(slotMap)
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -422,7 +421,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	// Lưu ý: Giả định gwAddr là địa chỉ HTTP (ví dụ: localhost:8081)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+gwAddr+"/api/update_beacon",
+		"http://"+gwAddr+"/update_beacon",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -452,38 +451,38 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	}
 }
 
-// handleWS upgrades HTTP to websocket and registers the client for broadcasts.
-func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	s.mutex.Lock()
-	s.clients[conn] = true
-	s.mutex.Unlock()
-
-	go func() {
-		defer func() {
-			s.mutex.Lock()
-			delete(s.clients, conn)
-			s.mutex.Unlock()
-			if err := conn.Close(); err != nil {
-				slog.Error("Failed to close websocket", "error", err)
-			}
-		}()
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				break
-			}
-		}
-	}()
-}
-
-// broadcast sends a message to all connected websocket clients.
-func (s *Server) broadcast(msg string) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	for c := range s.clients {
-		_ = c.WriteMessage(websocket.TextMessage, []byte(msg))
-	}
-}
+// // handleWS upgrades HTTP to websocket and registers the client for broadcasts.
+// func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+// 	conn, err := upgrader.Upgrade(w, r, nil)
+// 	if err != nil {
+// 		return
+// 	}
+// 	s.mutexWS.Lock()
+// 	s.clients[conn] = true
+// 	s.mutexWS.Unlock()
+//
+// 	go func() {
+// 		defer func() {
+// 			s.mutexWS.Lock()
+// 			delete(s.clients, conn)
+// 			s.mutexWS.Unlock()
+// 			if err := conn.Close(); err != nil {
+// 				slog.Error("Failed to close websocket", "error", err)
+// 			}
+// 		}()
+// 		for {
+// 			if _, _, err := conn.ReadMessage(); err != nil {
+// 				break
+// 			}
+// 		}
+// 	}()
+// }
+//
+// // broadcast sends a message to all connected websocket clients.
+// func (s *Server) broadcast(msg string) {
+// 	s.mutexWS.Lock()
+// 	defer s.mutexWS.Unlock()
+// 	for c := range s.clients {
+// 		_ = c.WriteMessage(websocket.TextMessage, []byte(msg))
+// 	}
+// }

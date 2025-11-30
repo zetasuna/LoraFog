@@ -104,8 +104,8 @@ func (g *Gateway) startHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
 
 	// Endpoint nhận danh sách Slot Map mới từ Server
-	mux.HandleFunc("/api/update_beacon", g.handleBeaconUpdate)
-	mux.HandleFunc("/api/control", g.handleControl)
+	mux.HandleFunc("/update_beacon", g.handleBeaconUpdate)
+	mux.HandleFunc("/control", g.handleControl)
 
 	server := &http.Server{Addr: g.Address, Handler: mux}
 
@@ -296,7 +296,7 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 	payload, _ := json.Marshal(register)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+g.ServerAddress+"/api/register",
+		"http://"+g.ServerAddress+"/register",
 		bytes.NewReader(payload),
 	)
 	if err != nil {
@@ -348,7 +348,7 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 	body, _ := json.Marshal(data)
 	req, err := http.NewRequestWithContext(ctx,
 		"POST",
-		"http://"+g.ServerAddress+"/api/telemetry",
+		"http://"+g.ServerAddress+"/telemetry",
 		bytes.NewReader(body),
 	)
 	if err != nil {

@@ -59,15 +59,15 @@ func NewSystem(path string) (*System, error) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// 1. Mở kết nối DB ở đây (trong main)
-	dsn := "admin:admin@tcp(localhost:3306)/boat_db"
-	sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
-	if err != nil {
-		slog.Error("Database established fail", "error", err)
-	} else {
-		slog.Info("Database established success")
-	}
 	if cfg.Server.Address != "" {
+		// 1. Mở kết nối DB ở đây (trong main)
+		dsn := "admin:admin@tcp(localhost:3306)/boat_db"
+		sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
+		if err != nil {
+			slog.Error("Database established fail", "error", err)
+		} else {
+			slog.Info("Database established success")
+		}
 		sys.server = NewServer(
 			cfg.Server.Address,
 			cfg.Server.AppAddress,

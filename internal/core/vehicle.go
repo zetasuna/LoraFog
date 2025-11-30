@@ -119,12 +119,12 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 	if v.arduino == nil {
 		v.mu.Lock()
 		v.lastTelemetry = model.ArduinoData{
-			Latitude:    21.027 + rand.Float64()*0.001,
-			Longitude:   105.835 + rand.Float64()*0.001,
-			CurrentHead: rand.Int63n(361),
-			TargetHead:  rand.Int63n(361),
-			LeftSpeed:   1000 + rand.Int63n(1000),
-			RightSpeed:  1000 + rand.Int63n(1000),
+			Latitude:    21.0532 + rand.Float64()*0.001,
+			Longitude:   105.8261 + rand.Float64()*0.001,
+			CurrentHead: 0,    // + rand.Int63n(361),
+			TargetHead:  0,    // + rand.Int63n(361),
+			LeftSpeed:   1000, // + rand.Int63n(1000),
+			RightSpeed:  1000, // + rand.Int63n(1000),
 		}
 		v.mu.Unlock()
 	}
