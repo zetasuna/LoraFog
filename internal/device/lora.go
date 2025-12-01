@@ -11,7 +11,7 @@ import (
 )
 
 // ErrLoraTimeout được dùng khi không nhận được frame trong thời gian quy định
-var ErrLoraTimeout = errors.New("lora read timeout")
+var ErrLoraTimeout = errors.New("[Lora] Read timeout")
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
 type Lora struct {
@@ -24,8 +24,8 @@ type Lora struct {
 func NewLora(path string, baud int) *Lora {
 	serial, err := NewSerial(path, baud)
 	if err != nil {
-		slog.Warn("failed to connect Lora device",
-			"component", "lora", "device", path, "error", err)
+		slog.Warn("[Lora] Failed to connect Lora device",
+			"device", path, "error", err)
 	}
 	return &Lora{
 		Path:   path,
@@ -39,7 +39,7 @@ func NewLora(path string, baud int) *Lora {
 // (Logic goroutine/select đã được loại bỏ)
 func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 	if l.serial == nil {
-		return nil, fmt.Errorf("lora serial not initialized")
+		return nil, fmt.Errorf("[Lora] Serial not initialized")
 	}
 
 	// 1. Đọc 2 bytes header (độ dài), sử dụng timeout
@@ -65,7 +65,7 @@ func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 
 func (l *Lora) Write(b []byte) error {
 	if l.serial == nil {
-		return fmt.Errorf("lora serial not initialized")
+		return fmt.Errorf("[Lora] Serial not initialized")
 	}
 	// prefix with 2-byte big endian length
 	if len(b) == 0 || len(b) > 0xFFFF {

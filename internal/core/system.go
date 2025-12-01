@@ -54,7 +54,7 @@ func NewSystem(path string) (*System, error) {
 			vs.Left,
 			vs.Right,
 		); err != nil {
-			slog.Error("Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
+			slog.Error("[System] Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
 		}
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -64,9 +64,9 @@ func NewSystem(path string) (*System, error) {
 		dsn := "admin:admin@tcp(localhost:3306)/boat_db"
 		sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
 		if err != nil {
-			slog.Error("Database established fail", "error", err)
+			slog.Error("[System] Database established fail", "error", err)
 		} else {
-			slog.Info("Database established success")
+			slog.Info("[System] Database established success")
 		}
 		sys.server = NewServer(
 			cfg.Server.Address,
@@ -136,7 +136,7 @@ func (s *System) Start(ctx context.Context) error {
 
 // Stop gracefully stops all components.
 func (s *System) Stop() {
-	slog.Info("System is stopping...")
+	slog.Info("[System] Stopping...")
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -159,5 +159,5 @@ func (s *System) Stop() {
 		s.socatManager.Cleanup()
 	}
 	s.wg.Wait()
-	slog.Info("Shutdown complete")
+	slog.Info("[System] Shutdown complete")
 }

@@ -76,17 +76,18 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.wg.Add(1)
 	go g.uplinkLoop(ctx)
 
-	slog.Info("Gateway started", "address", g.Address)
+	slog.Info("[Gateway] Started", "gateway", g.Address)
 	return nil
 }
 
 // Stop gracefully stops the gateway and closes resources.
 func (g *Gateway) Stop() {
-	slog.Info("Gateway is stopping", "address", g.Address)
+	slog.Info("[Gateway] Stopping", "gateway", g.Address)
 
 	if g.lora != nil {
 		if err := g.lora.Close(); err != nil {
-			slog.Warn("Failed to close LoRa device", "error", err)
+			slog.Warn("[Gateway] Failed to close LoRa device",
+				"gateway", g.Address, "error", err)
 		}
 	}
 
@@ -95,7 +96,7 @@ func (g *Gateway) Stop() {
 	}
 
 	g.wg.Wait()
-	slog.Info("Gateway stopped", "address", g.Address)
+	slog.Info("[Gateway] Stopped", "address", g.Address)
 }
 
 // startHTTPServer khởi động server HTTP nội bộ để nhận lệnh từ Fog Server
@@ -111,7 +112,7 @@ func (g *Gateway) startHTTPServer(ctx context.Context) {
 
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("Gateway HTTP server error", "addr", g.Address, "error", err)
+			slog.Error("[Gateway] HTTP server error", "gateway", g.Address, "error", err)
 		}
 	}()
 
@@ -119,9 +120,9 @@ func (g *Gateway) startHTTPServer(ctx context.Context) {
 	ctxShutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctxShutdown); err != nil {
-		slog.Error("Gateway HTTP server shutdown failed", "addr", g.Address, "error", err)
+		slog.Error("[Gateway] HTTP server shutdown failed", "gateway", g.Address, "error", err)
 	} else {
-		slog.Info("Gateway HTTP server shutdown clean", "addr", g.Address)
+		slog.Info("[Gateway] HTTP server shutdown clean", "gateway", g.Address)
 	}
 }
 
@@ -137,7 +138,7 @@ func (g *Gateway) handleBeaconUpdate(w http.ResponseWriter, r *http.Request) {
 	g.slotMutex.Lock()
 	g.currentSlots = newMap
 	g.slotMutex.Unlock()
-	slog.Info("Beacon slots updated by Server",
+	slog.Info("[Gateway] Beacon slots updated by Server",
 		"gateway", g.Address,
 		"count", len(newMap),
 	)
@@ -155,13 +156,15 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 	controlCBOR, err := cbor.Marshal(controlJSON)
 	if err != nil {
-		slog.Error("Failed to marshal beacon", "error", err)
+		slog.Error("[Gateway] Failed to marshal CONTROL",
+			"gateway", g.Address, "error", err)
 		return
 	}
 	if err := g.lora.Write(controlCBOR); err != nil {
-		slog.Error("Failed to write beacon to LoRa", "err", err)
+		slog.Error("[Gateway] Failed to write CONTROL to LoRa",
+			"gateway", g.Address, "err", err)
 	} else {
-		slog.Info("Gateway send control", "gateway", g.Address)
+		slog.Info("[Gateway] Send CONTROL", "gateway", g.Address)
 	}
 }
 
@@ -201,16 +204,18 @@ func (g *Gateway) beaconLoop(ctx context.Context) {
 
 			payload, err := cbor.Marshal(beacon)
 			if err != nil {
-				slog.Error("Failed to marshal beacon", "error", err)
+				slog.Error("[Gateway] Failed to marshal BEACON",
+					"gateway", g.Address, "error", err)
 				continue
 			}
 
 			// SYNC (tại thời điểm này)
 			if err := g.lora.Write(payload); err != nil {
-				slog.Error("Failed to write beacon to LoRa", "err", err)
+				slog.Error("[Gateway] Failed to write BEACON to LoRa",
+					"gateway", g.Address, "err", err)
 			} else {
 				slog.Info(
-					"Beacon Broadcast",
+					"[Gateway] Broadcast BEACON",
 					"gateway", g.Address, "slots", len(slots),
 				)
 			}
@@ -234,7 +239,8 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 			if err == device.ErrLoraTimeout {
 				continue // Tiếp tục vòng lặp
 			}
-			slog.Error("Lora read error", "error", err)
+			slog.Error("[Gateway] Lora read error",
+				"gateway", g.Address, "error", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -242,13 +248,14 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 		// Phân loại gói tin
 		var generic map[string]any
 		if err := cbor.Unmarshal(frame, &generic); err != nil {
-			slog.Warn("Received unknown or corrupted CBOR packet", "err", err)
+			slog.Warn("[Gateway] Received unknown or corrupted CBOR packet",
+				"gateway", g.Address, "err", err)
 			continue
 		}
 
 		msgType, ok := generic["type"].(string)
 		if !ok {
-			slog.Warn("Packet type missing")
+			slog.Warn("[Gateway] Packet type missing", "gateway", g.Address)
 			continue
 		}
 
@@ -256,7 +263,8 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 		case model.PacketHello:
 			var hello model.HelloMessage
 			if err := cbor.Unmarshal(frame, &hello); err == nil {
-				slog.Info("Received Hello (Register)", "vehicle_id", hello.VehicleID)
+				slog.Info("[Gateway] Received HELLO",
+					"gateway", g.Address, "source", hello.VehicleID)
 				g.postRegisterToServer(hello.VehicleID)
 			}
 		case model.PacketTelemetry:
@@ -269,17 +277,19 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 
 				if !exists {
 					// Vehicle không có slot → bỏ qua telemetry
-					slog.Warn("Telemetry ignored: vehicle has no active slot",
-						"vehicle_id", telemetry.VehicleID)
+					slog.Warn("[Gateway] Ignored TELEMETRY: vehicle has no active slot",
+						"gateway", g.Address, "source", telemetry.VehicleID)
 					continue
 				}
 
 				// Vehicle hợp lệ → gửi lên Server
-				slog.Debug("Received Telemetry", "vehicle_id", telemetry.VehicleID)
+				slog.Info("[Gateway] Received TELEMETRY",
+					"gateway", g.Address, "source", telemetry.VehicleID)
 				g.postTelemetryToServer(telemetry)
 			}
 		default:
-			slog.Debug("Received unhandled message type", "type", msgType)
+			slog.Info("[Gateway] Received unhandled message type",
+				"gateway", g.Address, "type", msgType)
 		}
 	}
 }
@@ -300,7 +310,8 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 		bytes.NewReader(payload),
 	)
 	if err != nil {
-		slog.Error("Failed to build register request", "err", err)
+		slog.Error("[Gateway] Failed to build register request",
+			"gateway", g.Address, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -308,20 +319,21 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		slog.Error(
-			"Failed to POST register to Server",
-			"server", g.ServerAddress, "error", err,
+			"[Gateway] Failed to POST register to Server",
+			"gateway", g.Address, "server", g.ServerAddress, "error", err,
 		)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	slog.Info(
-		"Gateway send registry",
+		"[Gateway] Send REGISTER",
 		"gateway", g.Address,
 		"vehicle", vehicleID,
 	)
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Server rejected registration", "status", resp.Status)
+		slog.Warn("[Gateway] Server rejected registration",
+			"gateway", g.Address, "status", resp.Status)
 		return
 	}
 
@@ -329,13 +341,13 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 	var registerResponse model.RegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&registerResponse); err != nil && err != http.ErrBodyReadAfterClose {
 		// decode error is non-fatal but log
-		slog.Warn("Failed to parse register response", "err", err)
+		slog.Warn("[Gateway] Failed to parse register response",
+			"gateway", g.Address, "err", err)
 	} else {
 		slog.Info(
-			"Register accepted by server",
-			"vehicle", vehicleID,
-			"slot", registerResponse.Slot,
+			"[Gateway] Register accepted by server",
 			"gateway", registerResponse.GatewayAddress,
+			"vehicle", vehicleID, "slot", registerResponse.Slot,
 		)
 	}
 }
@@ -352,7 +364,8 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		slog.Error("Failed to build telemetry request", "err", err)
+		slog.Error("[Gateway] Failed to build telemetry request",
+			"gateway", g.Address, "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -360,15 +373,15 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		slog.Error(
-			"Failed to POST telemetry to Server",
-			"server", g.ServerAddress, "error", err,
+			"[Gateway] Failed to POST telemetry to Server",
+			"gateway", g.Address, "server", g.ServerAddress, "error", err,
 		)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	slog.Info(
-		"Gateway send registry",
+		"[Gateway] Send TELEMETRY",
 		"gateway", g.Address,
 		"vehicle", data.VehicleID,
 		"lat", data.Latitude,

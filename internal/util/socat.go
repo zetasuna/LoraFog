@@ -32,7 +32,7 @@ func (m *SocatManager) CreatePair(left, right string) error {
 	defer m.mu.Unlock()
 
 	if m.stopped {
-		return fmt.Errorf("socat manager is stopped")
+		return fmt.Errorf("[Socat] Manager is stopped")
 	}
 
 	cmd := exec.CommandContext(context.Background(),
@@ -45,11 +45,11 @@ func (m *SocatManager) CreatePair(left, right string) error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		slog.Warn("failed to start socat", "component", "socat", "left", left, "right", right, "error", err)
+		slog.Warn("[Socat] Failed to start socat", "left", left, "right", right, "error", err)
 		return fmt.Errorf("start socat: %w", err)
 	}
 
-	slog.Info("socat started", "component", "socat", "pid", cmd.Process.Pid, "left", left, "right", right)
+	slog.Info("[Socat] Started", "pid", cmd.Process.Pid, "left", left, "right", right)
 	m.cmds = append(m.cmds, cmd)
 	m.links = append(m.links, left, right)
 
@@ -83,7 +83,7 @@ func (m *SocatManager) Cleanup() {
 			continue
 		}
 		p := cmd.Process
-		slog.Info("killing socat process", "component", "socat", "pid", p.Pid)
+		slog.Info("[Socat] Killing socat process", "pid", p.Pid)
 		_ = p.Signal(syscall.SIGTERM)
 		// wait with timeout
 		done := make(chan error, 1)
@@ -99,9 +99,9 @@ func (m *SocatManager) Cleanup() {
 	for _, path := range m.links {
 		if _, err := os.Lstat(path); err == nil {
 			if err := os.Remove(path); err != nil {
-				slog.Warn("failed to remove socat link", "component", "socat", "path", path, "error", err)
+				slog.Warn("[Socat] Failed to remove socat link", "path", path, "error", err)
 			} else {
-				slog.Info("removed socat link", "component", "socat", "path", path)
+				slog.Info("[Socat] Removed socat link", "path", path)
 			}
 		}
 	}
@@ -109,12 +109,12 @@ func (m *SocatManager) Cleanup() {
 	// clear slices
 	m.cmds = nil
 	m.links = nil
-	slog.Info("socat cleanup complete", "component", "socat")
+	slog.Info("[Socat] Cleanup complete")
 }
 
 // CleanupAll is a failsafe that attempts to kill any running socat globally.
 func (m *SocatManager) CleanupAll() {
 	// Best-effort: use pkill if available.
 	_ = exec.Command("pkill", "-f", "socat").Run()
-	slog.Info("socat global cleanup attempted", "component", "socat")
+	slog.Info("[Socat] Global cleanup attempted")
 }

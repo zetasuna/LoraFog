@@ -23,8 +23,8 @@ type Arduino struct {
 func NewArduino(dev string, baud int) *Arduino {
 	s, err := NewSerial(dev, baud)
 	if err != nil {
-		slog.Warn("failed to connect Arduino",
-			"component", "arduino", "device", dev, "error", err)
+		slog.Warn("[Arduino] Failed to connect Arduino",
+			"device", dev, "error", err)
 	}
 	return &Arduino{
 		Device: dev,
@@ -37,7 +37,7 @@ func NewArduino(dev string, baud int) *Arduino {
 // It returns a stop function that can be called to terminate the loop safely.
 func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
 	if a.serial == nil {
-		return nil, fmt.Errorf("arduino serial not initialized")
+		return nil, fmt.Errorf("[Arduino] Serial not initialized")
 	}
 
 	stop := make(chan struct{})
@@ -46,8 +46,8 @@ func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
 		for {
 			select {
 			case <-stop:
-				slog.Info("stopping Arduino read loop",
-					"component", "arduino", "device", a.Device)
+				slog.Info("[Arduino] Stopping read loop",
+					"device", a.Device)
 				return
 			default:
 			}
@@ -78,7 +78,7 @@ func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
 // Write sends a single line to the Arduino serial interface.
 func (a *Arduino) Write(line string) error {
 	if a.serial == nil {
-		return fmt.Errorf("arduino serial not initialized")
+		return fmt.Errorf("[Arduino] Serial not initialized")
 	}
 	return a.serial.WriteLine(line)
 }
@@ -129,8 +129,7 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 		}
 	}()
 
-	slog.Info("starting Arduino simulation",
-		"component", "arduino", "device", a.Device)
+	slog.Info("[Arduino] Starting simulation", "device", a.Device)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -138,29 +137,18 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 	for {
 		select {
 		case <-stop:
-			slog.Info("stopping Arduino simulation",
-				"component", "arduino", "device", a.Device)
+			slog.Info("[Arduino] Stopping simulation",
+				"device", a.Device)
 			return nil
 		case line := <-readCh:
 			// EXPECT: speed,lat,lon,Kp,Ki,Kd
 			if _, err := fmt.Sscanf(line, "%f,%f,%f,%f,%f,%f",
 				&baseSpeed, &targetLat, &targetLon, &Kp, &Ki, &Kd,
 			); err == nil {
-				slog.Info("Simulation: received new target",
+				slog.Info("[Arduino] Simulation: Received new target",
 					"speed", baseSpeed, "lat", targetLat, "lon", targetLon)
 			}
 		case <-ticker.C:
-			// data := model.ArduinoData{
-			// 	Latitude:    21.027 + rand.Float64()*0.001,
-			// 	Longitude:   105.835 + rand.Float64()*0.001,
-			// 	CurrentHead: rand.Int63n(361),
-			// 	TargetHead:  rand.Int63n(361),
-			// 	LeftSpeed:   1000 + rand.Int63n(1000),
-			// 	RightSpeed:  1000 + rand.Int63n(1000),
-			// }
-			// line := fmt.Sprintf("%f,%f,%d,%d,%d,%d",
-			// 	data.Latitude, data.Longitude, data.CurrentHead,
-			// 	data.TargetHead, data.LeftSpeed, data.RightSpeed)
 			// --- 1. Tính hướng cần đến ---
 			targetHead := bearing(latNow, lonNow, targetLat, targetLon)
 
@@ -192,8 +180,8 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 			)
 
 			if err := a.Write(line); err != nil {
-				slog.Warn("failed to write simulated telemetry",
-					"component", "arduino", "device", a.Device, "error", err)
+				slog.Warn("[Arduino] Failed to write simulated telemetry",
+					"device", a.Device, "error", err)
 			}
 		}
 	}

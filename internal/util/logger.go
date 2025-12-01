@@ -15,5 +15,5 @@ func SetupLogger() {
 	})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
-	slog.Info("logger initialized", "component", "util")
+	slog.Info("[Logger] Initialized")
 }

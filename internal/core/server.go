@@ -74,16 +74,16 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("Server HTTP failed to start", "error", err)
+			slog.Error("[Server] HTTP failed to start", "error", err)
 		}
 	}()
-	slog.Info("Server started", "address", s.Address)
+	slog.Info("[Server] Started", "address", s.Address)
 
 	<-ctx.Done()
 	ctxShutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctxShutdown)
-	slog.Info("Server stopped")
+	slog.Info("[Server] Stopped")
 	return nil
 }
 
@@ -98,7 +98,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info(
-		"Server received register",
+		"[Server] Received REGISTER",
 		"gateway", req.GatewayAddress,
 		"vehicle", req.VehicleID,
 	)
@@ -134,7 +134,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		)
 		s.pushSlotUpdateToGateway(oldGw)
 		slog.Info(
-			"Roaming: cleared old session",
+			"[Server] Roaming: Cleared old session",
 			"vehicle", req.VehicleID,
 			"old_gw", oldGw,
 		)
@@ -159,9 +159,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sessions[req.VehicleID] = newSession
 	s.mutex.Unlock()
-	slog.Info("New Session created",
+	slog.Info("[Server] Created new session",
+		"gateway", req.GatewayAddress,
 		"vehicle", req.VehicleID,
-		"gw", req.GatewayAddress,
 		"slot", newSlot,
 	)
 
@@ -175,7 +175,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		ctx, req.VehicleID, req.GatewayAddress,
 	); err != nil {
 		slog.Error(
-			"DB update failed during register",
+			"[Server] Failed to update DB during register",
 			"vehicle", req.VehicleID, "error", err,
 		)
 		// try to rollback session
@@ -199,7 +199,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(&resp); err != nil {
-		slog.Error("failed to write register response", "err", err)
+		slog.Error("[Server] Failed to write register response", "err", err)
 	}
 }
 
@@ -213,7 +213,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info(
-		"Server received telemetry",
+		"[Server] Received TELEMETRY",
 		"vehicle", telem.VehicleID,
 		"lat", telem.Latitude,
 		"lon", telem.Longitude,
@@ -222,7 +222,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	s.mutex.Lock()
 	if ses, ok := s.sessions[telem.VehicleID]; ok {
 		ses.CreatedAt = time.Now() // Reset TTL
-		slog.Debug("Telemetry received, TTL reset", "vehicle", telem.VehicleID)
+		slog.Info("[Server] Reset TTL", "vehicle", telem.VehicleID)
 		// forward to app server (if configured) - safe call with timeout
 		if s.AppAddress != "" {
 			go func(t model.VehicleData) {
@@ -247,13 +247,13 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 					bytes.NewReader(body),
 				)
 				if err != nil {
-					slog.Warn("failed build forward request", "err", err)
+					slog.Warn("[Server] Failed to build forward request", "err", err)
 					return
 				}
 				req.Header.Set("Content-Type", "application/json")
 				resp, err := s.httpClient.Do(req)
 				if err != nil {
-					slog.Warn("forward telemetry failed", "err", err)
+					slog.Warn("[Server] Failed to forward telemetry", "err", err)
 					return
 				}
 				_ = resp.Body.Close()
@@ -263,7 +263,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// session unknown: log and drop
-		slog.Warn("Telemetry received for unknown session", "vehicle", telem.VehicleID)
+		slog.Warn("[Server] Received TELEMETRY for unknown session", "vehicle", telem.VehicleID)
 	}
 	s.mutex.Unlock()
 
@@ -278,7 +278,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
-	slog.Info("Server received control")
+	slog.Info("[Server] Received CONTROL")
 
 	if controlApp.VehicleID == "" {
 		http.Error(w,
@@ -290,7 +290,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 
 	gatewayID, _ := s.database.GetVehicleGateway(context.Background(), controlApp.VehicleID)
 	if gatewayID == "" {
-		slog.Error("Control cannot reach because vehicle not belong to any gateway")
+		slog.Error("[Server] Control cannot reach because vehicle not belong to any gateway")
 		return
 	}
 
@@ -317,13 +317,13 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 			bytes.NewReader(body),
 		)
 		if err != nil {
-			slog.Warn("failed build forward request", "err", err)
+			slog.Warn("[Server] Failed to build forward request", "err", err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := s.httpClient.Do(req)
 		if err != nil {
-			slog.Warn("forward control failed", "err", err)
+			slog.Warn("[Server] Failed to forward control", "err", err)
 			return
 		}
 		_ = resp.Body.Close()
@@ -344,8 +344,8 @@ func (s *Server) sweeper(ctx context.Context) {
 			for vID, ses := range s.sessions {
 				if now.Sub(ses.CreatedAt) > ses.TTL {
 					slog.Info(
-						"Session expired (TTL)",
-						"vehicle", vID, "gw", ses.GatewayAddress,
+						"[Server] Session expired (TTL)",
+						"gateway", ses.GatewayAddress, "vehicle", vID,
 					)
 
 					// 1. Cập nhật DB -> NULL/Empty
@@ -387,7 +387,7 @@ func (s *Server) assignNewSlot(gwAddr string) int {
 			return i
 		}
 	}
-	slog.Error("Max slots reached", "gateway", gwAddr)
+	slog.Error("[Server] Max slots reached for gateway", "gateway", gwAddr)
 	return -1 // Không thể cấp slot
 }
 
@@ -426,8 +426,8 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	)
 	if err != nil {
 		slog.Error(
-			"Failed to build request for gateway",
-			"gw", gwAddr, "err", err,
+			"[Server] Failed to build request for gateway",
+			"gateway", gwAddr, "err", err,
 		)
 		return
 	}
@@ -436,8 +436,8 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		slog.Error(
-			"Failed to push slot update to Gateway",
-			"gw_addr", gwAddr, "error", err,
+			"[Server] Failed to push slot update to Gateway",
+			"gateway", gwAddr, "error", err,
 		)
 		return
 	}
@@ -445,9 +445,9 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Gateway rejected slot update", "gw_addr", gwAddr, "status", resp.Status)
+		slog.Warn("[Server] Gateway rejected slot update", "gateway", gwAddr, "status", resp.Status)
 	} else {
-		slog.Info("Successfully pushed slot map to Gateway", "gw_addr", gwAddr, "count", len(slotMap))
+		slog.Info("[Server] Successfully pushed slot map to Gateway", "gateway", gwAddr, "count", len(slotMap))
 	}
 }
 

@@ -28,7 +28,7 @@ func NewServerDB(dsn string, maxOpen, maxIdle int) (*ServerDB, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	slog.Info("MySQL connected", "dsn", dsn)
+	slog.Info("[Database] Connected", "dsn", dsn)
 	return &ServerDB{db: db}, nil
 }
 
@@ -54,20 +54,20 @@ func (s *ServerDB) UpdateVehicleGateway(ctx context.Context, vehicleID, gatewayI
 		q = `UPDATE boats SET gateway_id = NULL WHERE boatId = ?`
 		_, err := s.db.ExecContext(ctx, q, vehicleID)
 		if err != nil {
-			slog.Error("UpdateVehicleGateway failed", "vehicle", vehicleID, "error", err)
+			slog.Error("[Database] Failed to update Vehicle-Gateway", "vehicle", vehicleID, "error", err)
 			return err
 		}
-		slog.Info("DB: Vehicle unregistered", "vehicle", vehicleID)
+		slog.Info("[Database] Unregistered vehicle", "vehicle", vehicleID)
 		return nil
 	}
 
 	q = `UPDATE boats SET gateway_id = ? WHERE boatId = ?`
 	_, err := s.db.ExecContext(ctx, q, gatewayID, vehicleID)
 	if err != nil {
-		slog.Error("UpdateVehicleGateway failed", "vehicle", vehicleID, "gateway", gatewayID, "error", err)
+		slog.Error("[Database] Failed to update Vehicle-Gateway", "vehicle", vehicleID, "gateway", gatewayID, "error", err)
 		return err
 	}
-	slog.Info("DB: Vehicle registered", "vehicle", vehicleID, "gateway", gatewayID)
+	slog.Info("[Database] Registered vehicle", "vehicle", vehicleID, "gateway", gatewayID)
 	return nil
 }
 

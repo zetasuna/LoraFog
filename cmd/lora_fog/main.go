@@ -34,12 +34,12 @@ func main() {
 
 	// --- Setup global logger ---
 	util.SetupLogger()
-	slog.Info("starting LoraFog runtime", "component", "main", "config", *cfgPath)
+	slog.Info("[System] Starting LoraFog runtime", "config", *cfgPath)
 
 	// --- Validate config early ---
 	cfg, err := loadAndValidateConfig(*cfgPath)
 	if err != nil {
-		slog.Error("invalid configuration", "component", "main", "error", err)
+		slog.Error("[System] Invalid configuration", "error", err)
 		os.Exit(1)
 	}
 	_ = cfg // not used directly (System loads internally)
@@ -47,7 +47,7 @@ func main() {
 	// --- Create system instance ---
 	system, err := core.NewSystem(*cfgPath)
 	if err != nil {
-		slog.Error("failed to initialize system", "component", "main", "error", err)
+		slog.Error("[System] Failed to initialize system", "error", err)
 		os.Exit(1)
 	}
 
@@ -57,21 +57,21 @@ func main() {
 
 	// --- Start all components ---
 	if err := system.Start(ctx); err != nil {
-		slog.Error("system start failed", "component", "main", "error", err)
+		slog.Error("[System] Failed to start", "error", err)
 		os.Exit(1)
 	}
 
 	// --- Wait for termination signal ---
-	slog.Info("system running (press Ctrl+C to exit)", "component", "main")
+	slog.Info("[System] Running (press Ctrl+C to exit)")
 	<-ctx.Done()
 
 	// --- Graceful shutdown ---
-	slog.Info("shutting down system...", "component", "main")
+	slog.Info("[System] Shutting down...")
 	system.Stop()
 
 	// Allow time for async cleanup/logs
 	time.Sleep(500 * time.Millisecond)
-	slog.Info("LoraFog terminated successfully", "component", "main")
+	slog.Info("[System] Successfully terminated LoraFog")
 }
 
 // loadAndValidateConfig loads the YAML file and validates it.
