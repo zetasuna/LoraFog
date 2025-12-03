@@ -171,6 +171,8 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) uplinkLoop(ctx context.Context) {
 	defer g.wg.Done()
 
+	loraTimeout := 5 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -178,9 +180,9 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 		default:
 		}
 		// ReadFrameWithTimeout (50ms để không bị block lâu)
-		frame, err := g.lora.Read(50 * time.Millisecond)
+		frame, err := g.lora.Read(loraTimeout)
 		if err != nil {
-			if err == device.ErrSerialTimeout {
+			if err == device.ErrTimeout {
 				continue // Tiếp tục vòng lặp
 			}
 			slog.Error("[Gateway] Lora read error",

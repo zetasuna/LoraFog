@@ -13,7 +13,7 @@ import (
 	"go.bug.st/serial"
 )
 
-var ErrSerialTimeout = errors.New("[Serial] Read timeout")
+var ErrTimeout = errors.New("[Serial] Read timeout")
 
 // Serial represents a simple serial port connection.
 type Serial struct {
@@ -106,11 +106,11 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 		// Chuẩn hóa lỗi Timeout
 		// Nếu đọc được 0 byte và có lỗi -> Timeout
 		if readCount == 0 {
-			return nil, ErrSerialTimeout
+			return nil, ErrTimeout
 		}
 		// Nếu đọc dở dang (ví dụ cần 2 byte mà mới được 1)
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, ErrSerialTimeout
+			return nil, ErrTimeout
 		}
 		return nil, err
 	}

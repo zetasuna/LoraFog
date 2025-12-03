@@ -174,7 +174,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 		frame, err := v.lora.Read(beaconTimeout)
 		if err != nil {
 			// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
-			if err == device.ErrSerialTimeout {
+			if err == device.ErrTimeout {
 				// if we had a previous beacon and too long passed -> reset
 				if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
 					if v.state != StateIdle {
