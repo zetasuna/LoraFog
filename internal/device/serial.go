@@ -95,18 +95,22 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 	}
 
 	// 2. Đọc từ bufio.Reader
-	readCount, err := io.ReadFull(s.reader, buf)
+	readCount, err := io.ReadFull(s.Port, buf)
 
 	// 3. Reset timeout về blocking (0) sau khi đọc xong
-	_ = s.Port.SetReadTimeout(0)
+	if timeout != 0 {
+		_ = s.Port.SetReadTimeout(0)
+	}
 
 	if err != nil {
 		// Chuẩn hóa lỗi Timeout
-		if errors.Is(err, ErrSerialTimeout) || errors.Is(err, io.EOF) {
+		// Nếu đọc được 0 byte và có lỗi -> Timeout
+		if readCount == 0 {
 			return nil, ErrSerialTimeout
 		}
-		if errors.Is(err, io.ErrUnexpectedEOF) && readCount > 0 {
-			return nil, fmt.Errorf("read incomplete: %w", err)
+		// Nếu đọc dở dang (ví dụ cần 2 byte mà mới được 1)
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrSerialTimeout
 		}
 		return nil, err
 	}

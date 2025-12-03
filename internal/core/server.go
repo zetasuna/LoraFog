@@ -119,6 +119,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oldGw = oldSes.GatewayAddress
 		oldSlot = oldSes.Slot
 
+		if oldGw == req.GatewayAddress {
+			slog.Info("[Server] Vehicle wanted to register already had had session => Nothing change",
+				"gateway", req.GatewayAddress, "vehicle", req.VehicleID)
+			s.mutex.Unlock()
+			return
+		}
+
 		delete(s.sessions, req.VehicleID)
 		s.releaseSlot(oldGw, oldSlot)
 	}
@@ -433,6 +440,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	slog.Info("[Server] Pushing slot map to Gateway", "gateway", gwAddr, "count", len(slotMap))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		slog.Error(
@@ -441,14 +449,14 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 		)
 		return
 	}
-	// Ensure body closed
-	_ = resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("[Server] Gateway rejected slot update", "gateway", gwAddr, "status", resp.Status)
 	} else {
-		slog.Info("[Server] Successfully pushed slot map to Gateway", "gateway", gwAddr, "count", len(slotMap))
+		slog.Debug("[Server] Successfully pushed slot map to Gateway", "gateway", gwAddr, "count", len(slotMap))
 	}
+	// Ensure body closed
+	// _ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 }
 
 // // handleWS upgrades HTTP to websocket and registers the client for broadcasts.

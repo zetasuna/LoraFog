@@ -12,12 +12,11 @@ const (
 type BeaconMessage struct {
 	Type             string `json:"type" cbor:"type"` // "beacon"
 	GatewayAddress   string `json:"gateway_address" cbor:"gateway_address"`
-	CycleStart       int64  `json:"cycle_start" cbor:"cycle_start"`
-	NextCycleStart   int64  `json:"next_cycle_start" cbor:"next_cycle_start"`
-	CycleDurationMs  int64  `json:"cycle_dur_ms" cbor:"cycle_dur_ms"` // Tổng thời gian chu kỳ
-	SlotDurationMs   int64  `json:"slot_dur_ms" cbor:"slot_dur_ms"`   // Thời gian 1 slot
-	GuardTimeMs      int64  `json:"guard_ms" cbor:"guard_ms"`         // Thời gian nghỉ giữa các slot
-	RegisterWindowMs int64  `json:"reg_win_ms" cbor:"reg_win_ms"`     // Thời gian cuối cho đăng ký
+	CycleStartMs     int64  `json:"cycle_start_ms" cbor:"cycle_start_ms"`
+	SlotWindowMs     int64  `json:"slot_window_ms" cbor:"slot_window_ms"`
+	BeaconWindowMs   int64  `json:"beacon_window_ms" cbor:"beacon_window_ms"`
+	ControlWindowMs  int64  `json:"control_window_ms" cbor:"control_window_ms"`
+	RegisterWindowMs int64  `json:"register_window_ms" cbor:"register_window_ms"`
 	// Map: VehicleID -> SlotIndex. Vehicle dựa vào đây để biết mình được gửi ở slot nào.
 	SlotMap map[string]int `json:"slot_map" cbor:"slot_map"`
 }

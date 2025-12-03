@@ -4,14 +4,10 @@ package device
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 )
-
-// ErrLoraTimeout được dùng khi không nhận được frame trong thời gian quy định
-var ErrLoraTimeout = errors.New("[Lora] Read timeout")
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
 type Lora struct {

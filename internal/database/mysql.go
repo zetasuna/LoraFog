@@ -54,20 +54,20 @@ func (s *ServerDB) UpdateVehicleGateway(ctx context.Context, vehicleID, gatewayI
 		q = `UPDATE boats SET gateway_id = NULL WHERE boatId = ?`
 		_, err := s.db.ExecContext(ctx, q, vehicleID)
 		if err != nil {
-			slog.Error("[Database] Failed to update Vehicle-Gateway", "vehicle", vehicleID, "error", err)
+			slog.Error("[Database] Failed to update Vehicle-Gateway", "gateway", gatewayID, "vehicle", vehicleID, "error", err)
 			return err
 		}
-		slog.Info("[Database] Unregistered vehicle", "vehicle", vehicleID)
+		slog.Info("[Database] Unregistered vehicle", "gateway", gatewayID, "vehicle", vehicleID)
 		return nil
 	}
 
 	q = `UPDATE boats SET gateway_id = ? WHERE boatId = ?`
 	_, err := s.db.ExecContext(ctx, q, gatewayID, vehicleID)
 	if err != nil {
-		slog.Error("[Database] Failed to update Vehicle-Gateway", "vehicle", vehicleID, "gateway", gatewayID, "error", err)
+		slog.Error("[Database] Failed to update Vehicle-Gateway", "gateway", gatewayID, "vehicle", vehicleID, "error", err)
 		return err
 	}
-	slog.Info("[Database] Registered vehicle", "vehicle", vehicleID, "gateway", gatewayID)
+	slog.Info("[Database] Registered vehicle", "gateway", gatewayID, "vehicle", vehicleID)
 	return nil
 }
 

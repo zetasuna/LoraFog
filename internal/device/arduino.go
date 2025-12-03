@@ -95,16 +95,16 @@ func (a *Arduino) Close() error {
 func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 	// --- Simulation State ---
 	var (
-		latNow  = 21.027000
-		lonNow  = 105.835000
+		latNow  = 21.050299
+		lonNow  = 105.826633
 		headNow = 0.0 // độ
 	)
 
 	// --- Server Command State ---
 	var (
 		baseSpeed = 1000.0
-		targetLat = 21.0532
-		targetLon = 105.8261
+		targetLat = 21.050295
+		targetLon = 105.826633
 		Kp        = 0.0
 		Ki        = 0.0
 		Kd        = 0.0
@@ -149,30 +149,47 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 					"speed", baseSpeed, "lat", targetLat, "lon", targetLon)
 			}
 		case <-ticker.C:
+			// --- 0. Khởi tạo giá trị motor mặc định (Dừng) ---
+			left := 1000.0
+			right := 1000.0
+
 			// --- 1. Tính hướng cần đến ---
 			targetHead := bearing(latNow, lonNow, targetLat, targetLon)
+			dist := distanceMeters(latNow, lonNow, targetLat, targetLon)
+			// LOGIC MỚI: Nếu gần đến đích (< 5m), ép tốc độ về 1000 (Dừng)
+			if dist < 2.0 {
+				baseSpeed = 1000.0
+			}
 
-			// --- 2. PID Steering ---
-			err := normalizeAngle(targetHead - headNow)
-			integral += err
-			derivative := err - lastErr
-			lastErr = err
+			// --- 2. Logic di chuyển ---
+			// Chỉ di chuyển và tính PID nếu tốc độ > 1000
+			if baseSpeed > 1000 {
+				// --- PID Steering ---
+				err := normalizeAngle(targetHead - headNow)
+				integral += err
+				derivative := err - lastErr
+				lastErr = err
 
-			turn := Kp*err + Ki*integral + Kd*derivative
+				turn := Kp*err + Ki*integral + Kd*derivative
 
-			// --- 3. Tính motor ---
-			left := baseSpeed + turn
-			right := baseSpeed - turn
+				// --- Tính motor ---
+				left = baseSpeed + turn
+				right = baseSpeed - turn
 
-			left = clamp(left, 1000, 2000)
-			right = clamp(right, 1000, 2000)
+				left = clamp(left, 1000, 2000)
+				right = clamp(right, 1000, 2000)
 
-			// --- 4. Mô phỏng tàu di chuyển một chút ---
-			headNow = normalizeAngle(headNow + turn*0.1)
-			latNow += (math.Cos(deg2rad(headNow)) * 0.00001)
-			lonNow += (math.Sin(deg2rad(headNow)) * 0.00001)
+				// --- Mô phỏng tàu di chuyển một chút ---
+				headNow = normalizeAngle(headNow + turn*0.1)
+				latNow += (math.Cos(deg2rad(headNow)) * 0.00001)
+				lonNow += (math.Sin(deg2rad(headNow)) * 0.00001)
+			} else {
+				// Nếu dừng, reset các tham số PID để tránh tích lũy sai số khi đứng yên
+				integral = 0
+				lastErr = 0
+			}
 
-			// --- 5. Gửi dữ liệu như Arduino thật ---
+			// --- 3. Gửi dữ liệu như Arduino thật ---
 			line := fmt.Sprintf("%.6f,%.6f,%d,%d,%d,%d",
 				latNow, lonNow,
 				int(left), int(right),
@@ -185,6 +202,17 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 			}
 		}
 	}
+}
+
+func distanceMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371000 // Bán kính trái đất (mét)
+	dLat := deg2rad(lat2 - lat1)
+	dLon := deg2rad(lon2 - lon1)
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(deg2rad(lat1))*math.Cos(deg2rad(lat2))*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return R * c
 }
 
 func bearing(lat1, lon1, lat2, lon2 float64) float64 {
