@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"time"
 
 	"go.bug.st/serial"
@@ -20,8 +19,8 @@ type Serial struct {
 	Port     serial.Port
 	Path     string
 	BaudRate int
-	mu       sync.Mutex
-	reader   *bufio.Reader
+	// mu       sync.Mutex
+	reader *bufio.Reader
 }
 
 // NewSerial opens a serial port with the given path and baud rate.
@@ -67,8 +66,8 @@ func (s *Serial) WriteLine(data string) error {
 	if s.Port == nil {
 		return errors.New("[Serial] Port not initialized")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
 
 	if _, err := s.Port.Write([]byte(data + "\n")); err != nil {
 		slog.Warn("[Serial] Failed to write to serial",
@@ -86,9 +85,6 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 	}
 	buf := make([]byte, n)
 
-	// s.mu.Lock()
-	// defer s.mu.Unlock()
-
 	// 1. Thiết lập timeout cho Port trước khi đọc
 	if err := s.Port.SetReadTimeout(timeout); err != nil {
 		slog.Warn("[Serial] Failed to set read timeout", "device", s.Path, "error", err)
@@ -96,12 +92,11 @@ func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
 
 	// 2. Đọc từ bufio.Reader
 	readCount, err := io.ReadFull(s.Port, buf)
-
+	// 	_ = s.Port.SetReadTimeout(0)
 	// 3. Reset timeout về blocking (0) sau khi đọc xong
-	if timeout != 0 {
-		_ = s.Port.SetReadTimeout(0)
-	}
-
+	// if timeout != 0 {
+	// 	_ = s.Port.SetReadTimeout(0)
+	// }
 	if err != nil {
 		// Chuẩn hóa lỗi Timeout
 		// Nếu đọc được 0 byte và có lỗi -> Timeout
@@ -126,8 +121,6 @@ func (s *Serial) WriteBytes(b []byte) error {
 	if s.Port == nil {
 		return errors.New("[Serial] Port not initialized")
 	}
-	// s.mu.Lock()
-	// defer s.mu.Unlock()
 	if _, err := s.Port.Write(b); err != nil {
 		slog.Warn("[Serial] Failed to write bytes to serial",
 			"device", s.Path, "error", err)

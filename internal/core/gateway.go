@@ -74,8 +74,8 @@ func (g *Gateway) Start(ctx context.Context) error {
 	go g.loraLoop(ctx)
 
 	// 3. Khởi động vòng lặp Up Link
-	g.wg.Add(1)
-	go g.uplinkLoop(ctx)
+	// g.wg.Add(1)
+	// go g.uplinkLoop(ctx)
 
 	slog.Info("[Gateway] Started", "gateway", g.Address)
 	return nil
@@ -181,7 +181,7 @@ func (g *Gateway) uplinkLoop(ctx context.Context) {
 		default:
 		}
 		// ReadFrameWithTimeout (50ms để không bị block lâu)
-		frame, err := g.lora.Read(loraTimeout)
+		frame, err := g.lora.ReadLine(loraTimeout)
 		if err != nil {
 			if err == device.ErrTimeout {
 				continue // Tiếp tục vòng lặp
@@ -255,9 +255,9 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		case <-time.After(time.Until(nextCycleStart)):
 		}
 
-		// if time.Until(nextCycleStart) > 0 {
-		// 	g.sleepUntil(ctx, nextCycleStart)
-		// }
+		if time.Until(nextCycleStart) > 0 {
+			g.sleepUntil(ctx, nextCycleStart)
+		}
 
 		if time.Since(nextCycleStart) > 50*time.Millisecond {
 			slog.Warn("[Gateway] Cycle lagging detected, resyncing...", "gateway", g.Address)
@@ -293,17 +293,17 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		g.processControl(ctx, controlEnd)
 
 		// === REGISTER WINDOW ===
-		// slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Register")
-		// g.listenUntil(ctx, registerEnd, model.PacketHello)
+		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Register")
+		g.listenUntil(ctx, registerEnd, model.PacketHello)
 		// g.sleepUntil(ctx, registerEnd)
 
 		// === SLOT WINDOWS ===
-		// slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Slot")
-		// g.listenUntil(ctx, slotsEnd, model.PacketTelemetry)
+		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Slot")
+		g.listenUntil(ctx, slotsEnd, model.PacketTelemetry)
 		// g.sleepUntil(ctx, slotsEnd)
 
 		// === END CYCLE ===
-		// slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "End")
+		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "End")
 	}
 }
 
@@ -327,7 +327,7 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 		return
 	}
 
-	if err := g.lora.Write(payload); err != nil {
+	if err := g.lora.WriteLine(payload); err != nil {
 		slog.Error("[Gateway] Failed to send BEACON",
 			"gateway", g.Address, "error", err)
 	} else {
@@ -347,7 +347,7 @@ func (g *Gateway) sendControl(ctrl model.ControlData) {
 		return
 	}
 
-	if err := g.lora.Write(payload); err != nil {
+	if err := g.lora.WriteLine(payload); err != nil {
 		slog.Error("[Gateway] Failed to send CONTROL",
 			"gateway", g.Address, "vehicle", ctrl.VehicleID, "err", err)
 	} else {
@@ -386,12 +386,12 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time, expectedT
 		remaining := time.Until(deadline)
 		if remaining < 100*time.Millisecond {
 			g.sleepUntil(ctx, deadline)
-			return // Hết cửa sổ -> Thoát ngay để chuyển sang trạng thái khác
+			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
 		}
 
 		// slog.Info("1")
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.Read(remaining)
+		frame, err := g.lora.ReadLine(100 * time.Millisecond)
 		if err != nil {
 			// slog.Info("2")
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
@@ -400,7 +400,7 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time, expectedT
 			}
 			// Lỗi khác (IO error)
 			slog.Error("[Gateway] Read error", "err", err)
-			time.Sleep(100 * time.Millisecond) // Nghỉ chút tránh spam log
+			time.Sleep(10 * time.Millisecond) // Nghỉ chút tránh spam log
 			continue
 		}
 

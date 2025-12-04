@@ -3,16 +3,16 @@
 package device
 
 import (
-	"encoding/binary"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"time"
 )
 
-// Magic bytes: 0x4C 0x52 ('L', 'R')
 const (
-	MagicByte1 = 0x4C
-	MagicByte2 = 0x52
+	MaxPacketSize = 255
+	HeaderSize    = 2
+	MagicByte     = 0x42
 )
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
@@ -36,6 +36,58 @@ func NewLora(path string, baud int) *Lora {
 	}
 }
 
+// ReadLine reads a line from Serial, decodes Base64, and returns raw bytes.
+func (l *Lora) ReadLine(timeout time.Duration) ([]byte, error) {
+	if l.serial == nil {
+		return nil, fmt.Errorf("[Lora] Serial not initialized")
+	}
+
+	// Chuyển đổi duration sang ms
+	timeoutMs := int(timeout / time.Millisecond)
+
+	// 1. Đọc 1 dòng text (đã được tách bởi \n ở tầng Serial)
+	line, err := l.serial.ReadLine(timeoutMs)
+	if err != nil {
+		// Nếu lỗi là timeout nhưng vẫn đọc được chút dữ liệu rác -> trả lỗi Timeout chuẩn
+		// Cần check xem thư viện serial trả lỗi gì, thường thì ta map về ErrTimeout
+		if len(line) == 0 {
+			return nil, ErrTimeout // Định nghĩa biến này ở đâu đó hoặc dùng context.DeadlineExceeded
+		}
+		return nil, err
+	}
+
+	if len(line) == 0 {
+		return nil, nil // Dòng rỗng (do nhiễu hoặc xuống dòng thừa)
+	}
+
+	// 2. Giải mã Base64 -> Raw Bytes (CBOR)
+	payload, err := base64.StdEncoding.DecodeString(line)
+	if err != nil {
+		// Nếu decode lỗi, có thể do nhiễu đường truyền làm hỏng chuỗi Base64
+		// slog.Warn("[Lora] Base64 decode error", "line", line, "err", err)
+		return nil, fmt.Errorf("corrupted packet (base64 invalid)")
+	}
+
+	return payload, nil
+}
+
+// WriteLine encodes raw bytes to Base64 and writes as a line.
+func (l *Lora) WriteLine(b []byte) error {
+	if l.serial == nil {
+		return fmt.Errorf("[Lora] Serial not initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+
+	// 1. Mã hóa Raw Bytes -> Base64 String
+	// Việc này đảm bảo không bao giờ có ký tự \n nằm giữa gói tin
+	b64Str := base64.StdEncoding.EncodeToString(b)
+
+	// 2. Gửi chuỗi text xuống Serial (Hàm WriteLine sẽ tự thêm \n)
+	return l.serial.WriteLine(b64Str)
+}
+
 // Read tìm kiếm Magic Bytes để đồng bộ, sau đó đọc Frame
 func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 	if l.serial == nil {
@@ -43,80 +95,50 @@ func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 	}
 
 	start := time.Now()
+	readTimeout := 50 * time.Millisecond
 
 	// --- GIAI ĐOẠN 1: TÌM KIẾM MAGIC BYTES (SYNC) ---
-	// Chúng ta đọc từng byte một cho đến khi khớp Header 0x4C 0x52
-	// Việc này giúp bỏ qua toàn bộ log rác (như chữ "register", "info"...)
-
-	syncState := 0 // 0: Tìm byte 1, 1: Tìm byte 2
-
-	buf1 := make([]byte, 1)
-
 	for {
-		// Kiểm tra tổng thời gian timeout
-		if time.Since(start) > timeout {
+		remaining := timeout - time.Since(start)
+		if remaining < readTimeout {
 			return nil, ErrTimeout
 		}
 
-		// Đọc 1 byte với timeout ngắn (để check liên tục)
-		// Timeout nhỏ cho mỗi byte giúp loop phản ứng nhanh
-		n, err := l.serial.Port.Read(buf1)
+		b, err := l.serial.ReadBytes(1, readTimeout)
 		if err != nil {
-			// Nếu lỗi không phải timeout/EOF thì return
-			// Nhưng thường ta cứ continue để cố gắng sync
-			continue
-		}
-		if n == 0 {
-			continue // Chưa có dữ liệu
+			return nil, err
 		}
 
-		b := buf1[0]
-
-		if syncState == 0 {
-			if b == MagicByte1 {
-				syncState = 1 // Tìm thấy 'L', tìm tiếp 'R'
-			}
-		} else if syncState == 1 {
-			if b == MagicByte2 {
-				// Đã tìm thấy 'L' và 'R' liên tiếp -> SYNCED!
-				break
-			} else {
-				// Nếu byte này là 'L', có thể nó là bắt đầu mới
-				if b == MagicByte1 {
-					syncState = 1
-				} else {
-					syncState = 0 // Reset, tìm lại từ đầu
-				}
-			}
+		if b[0] == MagicByte {
+			break // sync OK
 		}
+
+		// Nếu sai → bỏ byte và tiếp tục tìm MAGIC
 	}
-
 	// --- GIAI ĐOẠN 2: ĐỌC LENGTH VÀ PAYLOAD ---
 	// Tính thời gian còn lại
-	elapsed := time.Since(start)
-	remaining := timeout - elapsed
-	if remaining < 10*time.Millisecond {
+	remaining := timeout - time.Since(start)
+	if remaining < readTimeout {
 		return nil, ErrTimeout
 	}
 
-	// Đọc 2 byte độ dài
-	header, err := l.serial.ReadBytes(2, remaining)
+	// Đọc 1 byte độ dài
+	header, err := l.serial.ReadBytes(1, readTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read length: %w", err)
 	}
 
-	length := binary.BigEndian.Uint16(header)
+	length := int(header[0])
 
 	// Kiểm tra độ dài hợp lý (ví dụ max 256 byte)
-	if length == 0 || length > 256 {
+	if length == 0 || length > MaxPacketSize {
 		// Nếu độ dài vô lý, có thể là sync sai (giả mạo), thoát ra
 		return nil, fmt.Errorf("invalid frame length %d", length)
 	}
 
 	// Cập nhật lại thời gian còn lại
-	elapsed = time.Since(start)
-	remaining = timeout - elapsed
-	if remaining < 10*time.Millisecond {
+	remaining = timeout - time.Since(start)
+	if remaining < readTimeout {
 		return nil, ErrTimeout
 	}
 
@@ -133,18 +155,17 @@ func (l *Lora) Write(b []byte) error {
 	if l.serial == nil {
 		return fmt.Errorf("[Lora] Serial not initialized")
 	}
-	if len(b) == 0 || len(b) > 0xFFFF {
+	if len(b) == 0 || len(b) > MaxPacketSize {
 		return fmt.Errorf("invalid payload size %d", len(b))
 	}
 
-	// Frame Format: [Magic1][Magic2][LenHigh][LenLow][Payload...]
-	// Tổng cộng overhead = 4 bytes
-	frame := make([]byte, 4+len(b))
+	// Frame Format: [Magic][Length][[Payload...]
+	// Tổng cộng overhead = 2 bytes
+	frame := make([]byte, HeaderSize+len(b))
 
-	frame[0] = MagicByte1
-	frame[1] = MagicByte2
-	binary.BigEndian.PutUint16(frame[2:4], uint16(len(b)))
-	copy(frame[4:], b)
+	frame[0] = MagicByte
+	frame[1] = byte(len(b))
+	copy(frame[2:], b)
 
 	return l.serial.WriteBytes(frame)
 }
