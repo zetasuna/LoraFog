@@ -412,11 +412,12 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localC
 	}
 
 	slotIndex := v.assignedSlot - 1
-	slotStart := localCycleStart.Add(time.Duration(
-		b.BeaconWindowMs+
-			b.ControlWindowMs+
-			b.RegisterWindowMs+
-			b.SlotWindowMs*int64(slotIndex)) * time.Millisecond)
+	slotStart := localCycleStart.Add(5*time.Millisecond +
+		time.Duration(
+			b.BeaconWindowMs+
+				b.ControlWindowMs+
+				b.RegisterWindowMs+
+				b.SlotWindowMs*int64(slotIndex))*time.Millisecond)
 	v.sleepUntil(ctx, slotStart)
 
 	// Re-check assigned slot hasn't changed

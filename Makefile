@@ -9,6 +9,7 @@ MAIN := cmd/lora_fog/main.go
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/$(APP_NAME)
 CONFIG := configs/config.yml
+TEST_CONFIG := configs/test.yml
 
 # Go parameters
 GO := go
@@ -36,6 +37,11 @@ build:
 run:
 	@echo "🚀 Running LoraFog with config: $(CONFIG)..."
 	@$(GO) run $(MAIN) -c $(CONFIG)
+
+.PHONY: demo
+demo:
+	@echo "🚀 Running LoraFog with config: $(TEST_CONFIG)..."
+	@$(GO) run $(MAIN) -c $(TEST_CONFIG)
 
 # Run with verbose output
 .PHONY: runv

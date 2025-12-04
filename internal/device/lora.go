@@ -121,7 +121,7 @@ func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
 	}
 
 	// Đọc Payload
-	payload, err := l.serial.ReadBytes(int(length), remaining)
+	payload, err := l.serial.ReadBytes(int(length), 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read payload: %w", err)
 	}

@@ -12,6 +12,7 @@ const (
 type BeaconMessage struct {
 	Type             string `json:"type" cbor:"type"` // "beacon"
 	GatewayAddress   string `json:"gateway_address" cbor:"gateway_address"`
+	GuardTimeMs      int64  `json:"guard_time_ms" cbor:"guard_time_ms"`
 	CycleStartMs     int64  `json:"cycle_start_ms" cbor:"cycle_start_ms"`
 	SlotWindowMs     int64  `json:"slot_window_ms" cbor:"slot_window_ms"`
 	BeaconWindowMs   int64  `json:"beacon_window_ms" cbor:"beacon_window_ms"`
