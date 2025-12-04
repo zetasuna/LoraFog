@@ -42,7 +42,7 @@ func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
 		return "", errors.New("[Serial] Port not initialized")
 	}
 
-	const packetTimeout = 50 * time.Millisecond
+	const packetTimeout = 200 * time.Millisecond
 	waitTimeout := time.Duration(timeoutMs) * time.Millisecond
 	if err := s.Port.SetReadTimeout(waitTimeout); err != nil {
 		slog.Warn("[Serial] Failed to set read timeout",
