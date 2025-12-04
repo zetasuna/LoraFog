@@ -339,7 +339,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 
 // sweeper: Quét các Session đã hết hạn (TTL Expired)
 func (s *Server) sweeper(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

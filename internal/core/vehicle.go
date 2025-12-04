@@ -144,15 +144,15 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 			v.mutexTelemetry.Lock()
 			v.lastTelemetry = data
 			v.mutexTelemetry.Unlock()
-			// slog.Info("Vehicle received arduino data",
-			// 	"vehicle", v.ID,
-			// 	"lat", data.Latitude,
-			// 	"lon", data.Longitude,
-			// 	"curHead", data.CurrentHead,
-			// 	"tarHead", data.TargetHead,
-			// 	"leftSpeed", data.LeftSpeed,
-			// 	"rightSpeed", data.RightSpeed,
-			// )
+			slog.Debug("Vehicle received arduino data",
+				"vehicle", v.ID,
+				"lat", data.Latitude,
+				"lon", data.Longitude,
+				"curHead", data.CurrentHead,
+				"tarHead", data.TargetHead,
+				"leftSpeed", data.LeftSpeed,
+				"rightSpeed", data.RightSpeed,
+			)
 		}
 	}
 }
@@ -161,7 +161,6 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 func (v *Vehicle) loraLoop(ctx context.Context) {
 	defer v.wg.Done()
 
-	// Sử dụng giá trị mặc định cho timeout chờ beacon (ví dụ: 5 giây)
 	var lastBeaconTime time.Time
 	beaconTimeout := 20 * time.Second
 
@@ -189,8 +188,8 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 			}
 			// Nếu đã Idle thì cứ tiếp tục lắng nghe
 			slog.Error("[Vehicle] Failed to read Lora",
-				"vehicle", v.ID, "state", v.state, "err", err)
-			time.Sleep(100 * time.Millisecond)
+				"vehicle", v.ID, "state", v.state, "error", err)
+			// time.Sleep(100 * time.Millisecond)
 			continue
 		}
 

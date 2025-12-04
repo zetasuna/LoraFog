@@ -21,7 +21,7 @@ import (
 
 const (
 	// Thông số TDMA cố định
-	LoraDuration     = int64(2000)
+	LoraDuration     = int64(1000)
 	GuardTimeMs      = LoraDuration
 	SlotWindowMs     = LoraDuration
 	BeaconWindowMs   = LoraDuration
@@ -291,7 +291,7 @@ func (g *Gateway) sleepUntil(ctx context.Context, deadline time.Time) {
 
 // listenUntil: Lắng nghe LoRa liên tục cho đến thời điểm deadline
 func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
-	const timeout = 100 * time.Millisecond
+	// const timeout = 100 * time.Millisecond
 	for {
 		// 1. Kiểm tra Context
 		select {
@@ -302,25 +302,24 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 
 		// 2. Kiểm tra Deadline
 		remaining := time.Until(deadline)
-		slog.Debug("[Listen]", "remain", remaining)
-		if remaining < timeout {
-			g.sleepUntil(ctx, deadline)
-			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
-		}
+		// slog.Debug("[Listen]", "remain", remaining)
+		// if remaining < timeout {
+		// 	g.sleepUntil(ctx, deadline)
+		// 	return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
+		// }
 
 		// 3. Đọc dữ liệu
 		frame, err := g.lora.ReadLine(remaining)
 		if err != nil {
-			// slog.Info("2")
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
 			if err == device.ErrTimeout { // Nhớ dùng biến lỗi chung device.ErrTimeout
 				slog.Debug("[Listen] End (timout)")
 				continue
 			}
 			// Lỗi khác (IO error)
-			slog.Error("[Gateway] Read error",
+			slog.Error("[Gateway] Fail to read Lora",
 				"gateway", g.Address, "error", err)
-			time.Sleep(timeout / 4) // Nghỉ chút tránh spam log
+			// time.Sleep(timeout / 4) // Nghỉ chút tránh spam log
 			continue
 		}
 
