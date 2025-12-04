@@ -163,7 +163,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 
 	// Sử dụng giá trị mặc định cho timeout chờ beacon (ví dụ: 5 giây)
 	var lastBeaconTime time.Time
-	beaconTimeout := 5 * time.Second
+	beaconTimeout := 20 * time.Second
 
 	for {
 		select {

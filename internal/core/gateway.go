@@ -21,8 +21,8 @@ import (
 
 const (
 	// Thông số TDMA cố định
-	LoraDuration     = int64(1000)
-	GuardTimeMs      = LoraDuration / 2
+	LoraDuration     = int64(2000)
+	GuardTimeMs      = LoraDuration
 	SlotWindowMs     = LoraDuration
 	BeaconWindowMs   = LoraDuration
 	ControlWindowMs  = LoraDuration * 2
@@ -309,7 +309,7 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 		}
 
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.ReadLine(timeout)
+		frame, err := g.lora.ReadLine(remaining)
 		if err != nil {
 			// slog.Info("2")
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
