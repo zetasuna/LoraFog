@@ -42,7 +42,7 @@ func NewSerial(path string, baud int) (*Serial, error) {
 }
 
 // ReadLine reads a line of data with an optional timeout (in milliseconds).
-func (s *Serial) ReadLine(timeoutMs int) (string, error) {
+func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
 	if s.Port == nil {
 		return "", errors.New("[Serial] Port not initialized")
 	}

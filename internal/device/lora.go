@@ -43,7 +43,7 @@ func (l *Lora) ReadLine(timeout time.Duration) ([]byte, error) {
 	}
 
 	// Chuyển đổi duration sang ms
-	timeoutMs := int(timeout / time.Millisecond)
+	timeoutMs := int64(timeout / time.Millisecond)
 
 	// 1. Đọc 1 dòng text (đã được tách bởi \n ở tầng Serial)
 	line, err := l.serial.ReadLine(timeoutMs)

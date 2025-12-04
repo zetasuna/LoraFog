@@ -384,14 +384,14 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time, expectedT
 
 		// 2. Kiểm tra Deadline
 		remaining := time.Until(deadline)
-		if remaining < 100*time.Millisecond {
+		if remaining < 10*time.Millisecond {
 			g.sleepUntil(ctx, deadline)
 			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
 		}
 
 		// slog.Info("1")
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.ReadLine(100 * time.Millisecond)
+		frame, err := g.lora.ReadLine(50 * time.Millisecond)
 		if err != nil {
 			// slog.Info("2")
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
@@ -438,8 +438,8 @@ func (g *Gateway) processLora(frame []byte, expectedType string) {
 	// Nếu đang ở Register Window mà nhận Telemetry -> Có thể Drop hoặc Warn
 
 	if msgType != expectedType {
-		slog.Warn("[Gateway] Received wrong packet type", "expect", expectedType, "receive", msgType)
-		return
+		slog.Debug("[Gateway] Received wrong packet type", "expect", expectedType, "receive", msgType)
+		// return
 	}
 
 	switch msgType {
