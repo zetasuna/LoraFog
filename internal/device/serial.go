@@ -126,8 +126,8 @@ func (s *Serial) WriteBytes(b []byte) error {
 	if s.Port == nil {
 		return errors.New("[Serial] Port not initialized")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
 	if _, err := s.Port.Write(b); err != nil {
 		slog.Warn("[Serial] Failed to write bytes to serial",
 			"device", s.Path, "error", err)
