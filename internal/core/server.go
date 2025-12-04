@@ -434,7 +434,7 @@ func (s *Server) pushSlotUpdateToGateway(gwAddr string) {
 	if err != nil {
 		slog.Error(
 			"[Server] Failed to build request for gateway",
-			"gateway", gwAddr, "err", err,
+			"gateway", gwAddr, "error", err,
 		)
 		return
 	}

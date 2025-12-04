@@ -235,6 +235,11 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				}
 				slog.Info("[Vehicle] Received CONTROL",
 					"vehicle", v.ID, "state", v.state)
+				if control.VehicleID != v.ID {
+					slog.Debug("[Vehicle] Not target control",
+						"vehicle", v.ID, "target", control.VehicleID)
+					continue
+				}
 				arduinoControl := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
 					control.Speed, control.Latitude, control.Longitude,
 					control.Kp, control.Ki, control.Kd)
@@ -275,7 +280,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 
 	// 3. TÍNH TOÁN CÁC MỐC THỜI GIAN (Dựa trên localCycleStart ĐÚNG)
 	controlStart := localCycleStart.Add(time.Duration(b.BeaconWindowMs) * time.Millisecond)
-	registerStart := controlStart.Add(time.Duration(b.ControlWindowMs) * time.Millisecond)
+	registerStart := controlStart.Add(time.Duration(b.ControlWindowMs+b.GuardTimeMs) * time.Millisecond)
 	registerTime := registerStart.Add(time.Duration(rand.Int63n(b.RegisterWindowMs/2)) * time.Millisecond)
 
 	// 4. Logic Roaming: Nếu gateway ID khác với hiện tại và đã có slot
@@ -416,8 +421,10 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localC
 		time.Duration(
 			b.BeaconWindowMs+
 				b.ControlWindowMs+
+				b.GuardTimeMs+
 				b.RegisterWindowMs+
-				b.SlotWindowMs*int64(slotIndex))*time.Millisecond)
+				b.GuardTimeMs+
+				(b.SlotWindowMs+b.GuardTimeMs)*int64(slotIndex))*time.Millisecond)
 	v.sleepUntil(ctx, slotStart)
 
 	// Re-check assigned slot hasn't changed

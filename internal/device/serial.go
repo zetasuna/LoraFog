@@ -2,10 +2,8 @@
 package device
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
 
@@ -19,8 +17,6 @@ type Serial struct {
 	Port     serial.Port
 	Path     string
 	BaudRate int
-	// mu       sync.Mutex
-	reader *bufio.Reader
 }
 
 // NewSerial opens a serial port with the given path and baud rate.
@@ -34,7 +30,6 @@ func NewSerial(path string, baud int) (*Serial, error) {
 		Port:     port,
 		Path:     path,
 		BaudRate: baud,
-		reader:   bufio.NewReader(port),
 	}
 	slog.Info("[Serial] Opened port",
 		"device", path, "baud", baud)
@@ -47,18 +42,65 @@ func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
 		return "", errors.New("[Serial] Port not initialized")
 	}
 
-	if timeoutMs > 0 {
-		if err := s.Port.SetReadTimeout(time.Duration(timeoutMs) * time.Millisecond); err != nil {
-			slog.Warn("[Serial] Failed to set read timeout",
-				"device", s.Path, "error", err)
-		}
+	const packetTimeout = 50 * time.Millisecond
+	waitTimeout := time.Duration(timeoutMs) * time.Millisecond
+	if err := s.Port.SetReadTimeout(waitTimeout); err != nil {
+		slog.Warn("[Serial] Failed to set read timeout",
+			"device", s.Path, "error", err)
 	}
 
-	line, err := s.reader.ReadString('\n')
+	var lineBuf []byte
+	oneByte := make([]byte, 1) // Buffer đọc từng byte
+	// Đọc byte đầu tiên
+	n, err := s.Port.Read(oneByte)
 	if err != nil {
-		return "", err
+		// Hết duration mà không có gì -> Timeout thật sự
+		return "", ErrTimeout
 	}
-	return line, nil
+	if n == 0 {
+		return "", ErrTimeout
+	}
+
+	// Đã có dữ liệu! Gom vào buffer
+	if oneByte[0] != '\n' && oneByte[0] != '\r' {
+		lineBuf = append(lineBuf, oneByte[0])
+	} else if oneByte[0] == '\n' {
+		return "", nil // Gói tin rỗng chỉ có xuống dòng
+	}
+
+	_ = s.Port.SetReadTimeout(packetTimeout)
+
+	for {
+		// Đọc 1 byte từ cổng Serial
+		n, err := s.Port.Read(oneByte)
+		if err != nil {
+			// Lỗi lúc này nghĩa là đang đọc dở thì đứt quãng (Inter-byte timeout)
+			// Tuy nhiên, ta vẫn trả về những gì đã đọc được để thử cứu vớt gói tin
+			// Hoặc return error nếu muốn chặt chẽ. Ở đây ta return những gì có.
+			if len(lineBuf) > 0 {
+				return string(lineBuf), nil
+			}
+			return "", err
+		}
+
+		if n == 0 {
+			// Hết timeout inter mà không có byte tiếp theo -> Coi như hết gói
+			continue
+		}
+
+		char := oneByte[0]
+
+		// 4. Kiểm tra ký tự xuống dòng
+		if char == '\n' {
+			// Đã tìm thấy kết thúc dòng -> Thành công
+			return string(lineBuf), nil
+		}
+
+		// Gom byte vào buffer (Bỏ qua \r nếu muốn sạch đẹp)
+		if char != '\r' {
+			lineBuf = append(lineBuf, char)
+		}
+	}
 }
 
 // WriteLine writes a single line (with newline terminator) to the serial port.
@@ -66,63 +108,9 @@ func (s *Serial) WriteLine(data string) error {
 	if s.Port == nil {
 		return errors.New("[Serial] Port not initialized")
 	}
-	// s.mu.Lock()
-	// defer s.mu.Unlock()
 
 	if _, err := s.Port.Write([]byte(data + "\n")); err != nil {
 		slog.Warn("[Serial] Failed to write to serial",
-			"device", s.Path, "error", err)
-		return err
-	}
-	return nil
-}
-
-// ReadBytes reads exactly n bytes from the serial port with a timeout.
-// Timeout=0 means blocking indefinitely.
-func (s *Serial) ReadBytes(n int, timeout time.Duration) ([]byte, error) {
-	if s.Port == nil {
-		return nil, errors.New("[Serial] Port not initialized")
-	}
-	buf := make([]byte, n)
-
-	// 1. Thiết lập timeout cho Port trước khi đọc
-	if err := s.Port.SetReadTimeout(timeout); err != nil {
-		slog.Warn("[Serial] Failed to set read timeout", "device", s.Path, "error", err)
-	}
-
-	// 2. Đọc từ bufio.Reader
-	readCount, err := io.ReadFull(s.Port, buf)
-	// 	_ = s.Port.SetReadTimeout(0)
-	// 3. Reset timeout về blocking (0) sau khi đọc xong
-	// if timeout != 0 {
-	// 	_ = s.Port.SetReadTimeout(0)
-	// }
-	if err != nil {
-		// Chuẩn hóa lỗi Timeout
-		// Nếu đọc được 0 byte và có lỗi -> Timeout
-		if readCount == 0 {
-			return nil, ErrTimeout
-		}
-		// Nếu đọc dở dang (ví dụ cần 2 byte mà mới được 1)
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, ErrTimeout
-		}
-		return nil, err
-	}
-
-	if readCount != n {
-		return nil, fmt.Errorf("read incomplete: expected %d, got %d", n, readCount)
-	}
-	return buf, nil
-}
-
-// WriteBytes writes raw binary data to the serial port without newline.
-func (s *Serial) WriteBytes(b []byte) error {
-	if s.Port == nil {
-		return errors.New("[Serial] Port not initialized")
-	}
-	if _, err := s.Port.Write(b); err != nil {
-		slog.Warn("[Serial] Failed to write bytes to serial",
 			"device", s.Path, "error", err)
 		return err
 	}

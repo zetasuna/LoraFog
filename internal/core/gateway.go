@@ -73,10 +73,6 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.wg.Add(1)
 	go g.loraLoop(ctx)
 
-	// 3. Khởi động vòng lặp Up Link
-	// g.wg.Add(1)
-	// go g.uplinkLoop(ctx)
-
 	slog.Info("[Gateway] Started", "gateway", g.Address)
 	return nil
 }
@@ -168,79 +164,6 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// uplinkLoop: Lắng nghe gói Hello (Register) và Telemetry từ Vehicle
-func (g *Gateway) uplinkLoop(ctx context.Context) {
-	defer g.wg.Done()
-
-	loraTimeout := 5 * time.Second
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		// ReadFrameWithTimeout (50ms để không bị block lâu)
-		frame, err := g.lora.ReadLine(loraTimeout)
-		if err != nil {
-			if err == device.ErrTimeout {
-				continue // Tiếp tục vòng lặp
-			}
-			slog.Error("[Gateway] Lora read error",
-				"gateway", g.Address, "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// Phân loại gói tin
-		var generic map[string]any
-		if err := cbor.Unmarshal(frame, &generic); err != nil {
-			slog.Warn("[Gateway] Received unknown or corrupted CBOR packet",
-				"gateway", g.Address, "err", err)
-			continue
-		}
-
-		msgType, ok := generic["type"].(string)
-		if !ok {
-			slog.Warn("[Gateway] Packet type missing", "gateway", g.Address)
-			continue
-		}
-
-		switch msgType {
-		case model.PacketHello:
-			var hello model.HelloMessage
-			if err := cbor.Unmarshal(frame, &hello); err == nil {
-				slog.Info("[Gateway] Received HELLO",
-					"gateway", g.Address, "vehicle", hello.VehicleID)
-				g.postRegisterToServer(hello.VehicleID)
-			}
-		case model.PacketTelemetry:
-			var telemetry model.VehicleData
-			if err := cbor.Unmarshal(frame, &telemetry); err == nil {
-				// Lấy lock để đọc currentSlots
-				g.slotMutex.Lock()
-				_, exists := g.currentSlots[telemetry.VehicleID]
-				g.slotMutex.Unlock()
-
-				if !exists {
-					// Vehicle không có slot → bỏ qua telemetry
-					slog.Warn("[Gateway] Ignored TELEMETRY: vehicle has no active slot",
-						"gateway", g.Address, "vehicle", telemetry.VehicleID)
-					continue
-				}
-
-				// Vehicle hợp lệ → gửi lên Server
-				slog.Info("[Gateway] Received TELEMETRY",
-					"gateway", g.Address, "vehicle", telemetry.VehicleID)
-				g.postTelemetryToServer(telemetry)
-			}
-		default:
-			slog.Info("[Gateway] Received unhandled message type",
-				"gateway", g.Address, "type", msgType)
-		}
-	}
-}
-
 // loraLoop: TDMA
 func (g *Gateway) loraLoop(ctx context.Context) {
 	defer g.wg.Done()
@@ -252,15 +175,16 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Until(nextCycleStart)):
+		default:
 		}
 
 		if time.Until(nextCycleStart) > 0 {
+			slog.Info("[Gateway] Sleep to next Cycle",
+				"gateway", g.Address)
 			g.sleepUntil(ctx, nextCycleStart)
-		}
-
-		if time.Since(nextCycleStart) > 50*time.Millisecond {
-			slog.Warn("[Gateway] Cycle lagging detected, resyncing...", "gateway", g.Address)
+		} else {
+			slog.Warn("[Gateway] Resync Cycle",
+				"gateway", g.Address)
 			nextCycleStart = time.Now()
 		}
 
@@ -276,9 +200,8 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		cycleStartMs := cycleStart.UnixNano() / int64(time.Millisecond)
 		beaconEnd := cycleStart.Add(time.Duration(BeaconWindowMs) * time.Millisecond)
 		controlEnd := beaconEnd.Add(time.Duration(ControlWindowMs) * time.Millisecond)
-		registerEnd := controlEnd.Add(time.Duration(RegisterWindowMs) * time.Millisecond)
-		slotsDuration := time.Duration(slotCount) * time.Duration(SlotWindowMs) * time.Millisecond
-		slotsEnd := registerEnd.Add(slotsDuration)
+		registerEnd := controlEnd.Add(time.Duration(GuardTimeMs+RegisterWindowMs+GuardTimeMs) * time.Millisecond)
+		slotsEnd := registerEnd.Add(time.Duration(int64(slotCount)*(SlotWindowMs+GuardTimeMs)) * time.Millisecond)
 
 		// Cập nhật thời điểm bắt đầu chu kỳ KẾ TIẾP
 		nextCycleStart = slotsEnd
@@ -292,16 +215,10 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Control")
 		g.processControl(ctx, controlEnd)
 
-		// === REGISTER WINDOW ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Register")
-		g.listenUntil(ctx, registerEnd, model.PacketHello)
+		// === LORA LISTENING ===
+		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Listen")
+		g.listenUntil(ctx, slotsEnd)
 		// g.sleepUntil(ctx, registerEnd)
-
-		// === SLOT WINDOWS ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Slot")
-		g.listenUntil(ctx, slotsEnd, model.PacketTelemetry)
-		// g.sleepUntil(ctx, slotsEnd)
-
 		// === END CYCLE ===
 		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "End")
 	}
@@ -331,7 +248,7 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 		slog.Error("[Gateway] Failed to send BEACON",
 			"gateway", g.Address, "error", err)
 	} else {
-		slog.Info("[Gateway] Beacon sent",
+		slog.Info("[Gateway] Sent BEACON",
 			"gateway", g.Address,
 			"slotCount", len(slots),
 		)
@@ -343,22 +260,22 @@ func (g *Gateway) sendControl(ctrl model.ControlData) {
 	payload, err := cbor.Marshal(ctrl)
 	if err != nil {
 		slog.Error("[Gateway] Control marshal error",
-			"gateway", g.Address, "err", err)
+			"gateway", g.Address, "error", err)
 		return
 	}
 
 	if err := g.lora.WriteLine(payload); err != nil {
 		slog.Error("[Gateway] Failed to send CONTROL",
-			"gateway", g.Address, "vehicle", ctrl.VehicleID, "err", err)
+			"gateway", g.Address, "vehicle", ctrl.VehicleID, "error", err)
 	} else {
 		slog.Info("[Gateway] Sent CONTROL",
-			"gateway", g.Address, "vid", ctrl.VehicleID)
+			"gateway", g.Address, "vehicle", ctrl.VehicleID)
 	}
 }
 
 // Hàm phụ trợ giúp sleep chính xác và hỗ trợ cancel context
-func (g *Gateway) sleepUntil(ctx context.Context, target time.Time) {
-	d := time.Until(target)
+func (g *Gateway) sleepUntil(ctx context.Context, deadline time.Time) {
+	d := time.Until(deadline)
 	if d <= 0 {
 		return
 	}
@@ -373,7 +290,8 @@ func (g *Gateway) sleepUntil(ctx context.Context, target time.Time) {
 }
 
 // listenUntil: Lắng nghe LoRa liên tục cho đến thời điểm deadline
-func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time, expectedType string) {
+func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
+	const timeout = 100 * time.Millisecond
 	for {
 		// 1. Kiểm tra Context
 		select {
@@ -384,48 +302,51 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time, expectedT
 
 		// 2. Kiểm tra Deadline
 		remaining := time.Until(deadline)
-		if remaining < 10*time.Millisecond {
+		slog.Debug("[Listen]", "remain", remaining)
+		if remaining < timeout {
 			g.sleepUntil(ctx, deadline)
 			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
 		}
 
-		// slog.Info("1")
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.ReadLine(50 * time.Millisecond)
+		frame, err := g.lora.ReadLine(timeout)
 		if err != nil {
 			// slog.Info("2")
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
 			if err == device.ErrTimeout { // Nhớ dùng biến lỗi chung device.ErrTimeout
+				slog.Debug("[Listen] End (timout)")
 				continue
 			}
 			// Lỗi khác (IO error)
-			slog.Error("[Gateway] Read error", "err", err)
-			time.Sleep(10 * time.Millisecond) // Nghỉ chút tránh spam log
+			slog.Error("[Gateway] Read error",
+				"gateway", g.Address, "error", err)
+			time.Sleep(timeout / 4) // Nghỉ chút tránh spam log
 			continue
 		}
 
 		if len(frame) == 0 {
+			slog.Debug("[Listen] End (lenght 0)")
 			continue
 		}
-		// slog.Info("3")
 
 		// 4. Xử lý gói tin (Spawn Goroutine để không chặn luồng lắng nghe)
 		payload := make([]byte, len(frame))
 		copy(payload, frame)
-
 		g.wg.Add(1)
 		go func(data []byte) {
 			defer g.wg.Done()
-			g.processLora(data, expectedType)
+			g.processLora(data)
 		}(payload)
+		slog.Debug("[Listen] End")
 	}
 }
 
 // processUplink: Xử lý logic gói tin (tách từ uplinkLoop cũ)
-func (g *Gateway) processLora(frame []byte, expectedType string) {
+func (g *Gateway) processLora(frame []byte) {
 	var generic map[string]any
 	if err := cbor.Unmarshal(frame, &generic); err != nil {
-		slog.Warn("[Gateway] Corrupted packet", "err", err)
+		slog.Warn("[Gateway] Corrupted packet",
+			"gateway", g.Address, "error", err)
 		return
 	}
 
@@ -435,13 +356,6 @@ func (g *Gateway) processLora(frame []byte, expectedType string) {
 	}
 
 	// Lọc gói tin theo Window (TDMA Enforcement)
-	// Nếu đang ở Register Window mà nhận Telemetry -> Có thể Drop hoặc Warn
-
-	if msgType != expectedType {
-		slog.Debug("[Gateway] Received wrong packet type", "expect", expectedType, "receive", msgType)
-		// return
-	}
-
 	switch msgType {
 	case model.PacketHello:
 		var hello model.HelloMessage
@@ -472,6 +386,7 @@ func (g *Gateway) processLora(frame []byte, expectedType string) {
 // processControlQueue: Gửi các lệnh trong hàng đợi cho đến khi hết giờ hoặc hết hàng đợi
 func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 	// packetDuration := time.Duration(LoraDuration) * time.Millisecond
+	const timout = 100 * time.Millisecond
 	for {
 		// 1. Tính thời gian còn lại trước khi hết giờ
 		// controlEnd := time.Now().Add(packetDuration)
@@ -480,7 +395,7 @@ func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 		// 2. Kiểm tra ngân sách thời gian (Time Budget)
 		// Nếu thời gian còn lại < thời gian cần gửi 1 gói -> Dừng ngay
 		// if remaining < packetDuration {
-		if remaining < 100*time.Millisecond {
+		if remaining < timout {
 			// slog.Debug("[Gateway] Not enough time for new packet, closing window")
 			g.sleepUntil(ctx, deadline)
 			return
@@ -491,7 +406,7 @@ func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 			return
 		case ctrl := <-g.controlQueue:
 			g.sendControl(ctrl)
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(timout / 4)
 			// g.sleepUntil(ctx, controlEnd)
 		default:
 			// g.sleepUntil(ctx, controlEnd)

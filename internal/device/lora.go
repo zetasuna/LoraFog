@@ -6,13 +6,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
-)
-
-const (
-	MaxPacketSize = 255
-	HeaderSize    = 2
-	MagicByte     = 0x42
 )
 
 // Lora manages binary (CBOR) communication over a serial LoRa interface.
@@ -56,7 +51,10 @@ func (l *Lora) ReadLine(timeout time.Duration) ([]byte, error) {
 		return nil, err
 	}
 
-	if len(line) == 0 {
+	// 2. Làm sạch chuỗi (CỰC KỲ QUAN TRỌNG CHO BASE64)
+	cleanLine := strings.TrimSpace(line)
+
+	if len(cleanLine) == 0 {
 		return nil, nil // Dòng rỗng (do nhiễu hoặc xuống dòng thừa)
 	}
 
@@ -86,88 +84,6 @@ func (l *Lora) WriteLine(b []byte) error {
 
 	// 2. Gửi chuỗi text xuống Serial (Hàm WriteLine sẽ tự thêm \n)
 	return l.serial.WriteLine(b64Str)
-}
-
-// Read tìm kiếm Magic Bytes để đồng bộ, sau đó đọc Frame
-func (l *Lora) Read(timeout time.Duration) ([]byte, error) {
-	if l.serial == nil {
-		return nil, fmt.Errorf("[Lora] Serial not initialized")
-	}
-
-	start := time.Now()
-	readTimeout := 50 * time.Millisecond
-
-	// --- GIAI ĐOẠN 1: TÌM KIẾM MAGIC BYTES (SYNC) ---
-	for {
-		remaining := timeout - time.Since(start)
-		if remaining < readTimeout {
-			return nil, ErrTimeout
-		}
-
-		b, err := l.serial.ReadBytes(1, readTimeout)
-		if err != nil {
-			return nil, err
-		}
-
-		if b[0] == MagicByte {
-			break // sync OK
-		}
-
-		// Nếu sai → bỏ byte và tiếp tục tìm MAGIC
-	}
-	// --- GIAI ĐOẠN 2: ĐỌC LENGTH VÀ PAYLOAD ---
-	// Tính thời gian còn lại
-	remaining := timeout - time.Since(start)
-	if remaining < readTimeout {
-		return nil, ErrTimeout
-	}
-
-	// Đọc 1 byte độ dài
-	header, err := l.serial.ReadBytes(1, readTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read length: %w", err)
-	}
-
-	length := int(header[0])
-
-	// Kiểm tra độ dài hợp lý (ví dụ max 256 byte)
-	if length == 0 || length > MaxPacketSize {
-		// Nếu độ dài vô lý, có thể là sync sai (giả mạo), thoát ra
-		return nil, fmt.Errorf("invalid frame length %d", length)
-	}
-
-	// Cập nhật lại thời gian còn lại
-	remaining = timeout - time.Since(start)
-	if remaining < readTimeout {
-		return nil, ErrTimeout
-	}
-
-	// Đọc Payload
-	payload, err := l.serial.ReadBytes(int(length), 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read payload: %w", err)
-	}
-
-	return payload, nil
-}
-
-func (l *Lora) Write(b []byte) error {
-	if l.serial == nil {
-		return fmt.Errorf("[Lora] Serial not initialized")
-	}
-	if len(b) == 0 || len(b) > MaxPacketSize {
-		return fmt.Errorf("invalid payload size %d", len(b))
-	}
-
-	// Frame Format: [Magic][Length][[Payload...]
-	// Tổng cộng overhead = 2 bytes
-	frame := make([]byte, HeaderSize+len(b))
-
-	frame[0] = MagicByte
-	frame[1] = byte(len(b))
-	copy(frame[2:], b)
-
-	return l.serial.WriteBytes(frame)
 }
 
 // Close safely closes the LoRa serial device.
