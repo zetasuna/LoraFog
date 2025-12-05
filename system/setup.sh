@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # --- Cài đặt udev rules ---
-if [! -f /etc/udev/rules.d/99-lora.rules ]; then
+if [ ! -f /etc/udev/rules.d/99-lora.rules ]; then
   sudo cp ./99-lora.rules /etc/udev/rules.d/
   sudo udevadm control --reload-rules
   sudo udevadm trigger
@@ -11,7 +11,7 @@ fi
 
 # --- Copy service vào ~/.local/bin nếu file tồn tại ---
 mkdir -p "$HOME/.local/bin"
-if [! -f "$HOME/.config/systemd/user/lora.service" ]; then
+if [ ! -f "$HOME/.config/systemd/user/lora.service" ]; then
   cp ./lora.service "$HOME/.config/systemd/user"
 else
   echo "⚠️  Tìm thấy file lora.service — bỏ qua bước copy."
