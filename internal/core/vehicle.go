@@ -23,6 +23,8 @@ const (
 	StateIdle    VehicleState = 0 // Chờ Beacon, chưa có slot
 	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
 	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
+
+	BeaconTimeout = 30 * time.Second
 )
 
 // Vehicle là đại diện cho thiết bị thuyền/xe
@@ -70,8 +72,7 @@ func (v *Vehicle) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	v.cancel = cancel
 
-	slog.Info("[Vehicle] Started",
-		"vehicle", v.ID)
+	slog.Info("[Vehicle] Started", "vehicle", v.ID)
 
 	// 1. Goroutine đọc Arduino liên tục để update lastTelem
 	if v.arduino != nil {
@@ -92,19 +93,22 @@ func (v *Vehicle) Stop() {
 	}
 	if v.lora != nil {
 		if err := v.lora.Close(); err != nil {
-			slog.Warn("[Vehicle] Failed to close LoRa device",
-				"vehicle", v.ID, "error", err)
+			slog.Warn(
+				"[Vehicle] Failed to close LoRa device",
+				"vehicle", v.ID, "error", err,
+			)
 		}
 	}
 	if v.arduino != nil {
 		if err := v.arduino.Close(); err != nil {
-			slog.Warn("[Vehicle] Failed to close Arduino device",
-				"vehicle", v.ID, "error", err)
+			slog.Warn(
+				"[Vehicle] Failed to close Arduino device",
+				"vehicle", v.ID, "error", err,
+			)
 		}
 	}
 	v.wg.Wait()
-	slog.Info("[Vehicle] Stopped",
-		"vehicle", v.ID)
+	slog.Info("[Vehicle] Stopped", "vehicle", v.ID)
 }
 
 // arduinoLoop đọc dữ liệu từ Arduino/Simulator
@@ -113,8 +117,10 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 	dataCh := make(chan model.ArduinoData, 5)
 	stop, err := v.arduino.Read(dataCh)
 	if err != nil {
-		slog.Warn("[Vehicle] Failed to read Arduino",
-			"vehicle", v.ID, "err", err)
+		slog.Warn(
+			"[Vehicle] Failed to read Arduino",
+			"vehicle", v.ID, "error", err,
+		)
 		return
 	}
 	defer stop()
@@ -144,7 +150,8 @@ func (v *Vehicle) arduinoLoop(ctx context.Context) {
 			v.mutexTelemetry.Lock()
 			v.lastTelemetry = data
 			v.mutexTelemetry.Unlock()
-			slog.Debug("Vehicle received arduino data",
+			slog.Debug(
+				"Vehicle received arduino data",
 				"vehicle", v.ID,
 				"lat", data.Latitude,
 				"lon", data.Longitude,
@@ -162,7 +169,6 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 	defer v.wg.Done()
 
 	var lastBeaconTime time.Time
-	beaconTimeout := 20 * time.Second
 
 	for {
 		select {
@@ -170,15 +176,17 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 			return
 		default:
 		}
-		frame, err := v.lora.ReadLine(beaconTimeout)
+		frame, err := v.lora.ReadLine(BeaconTimeout)
 		if err != nil {
 			// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
 			if err == device.ErrTimeout {
 				// if we had a previous beacon and too long passed -> reset
-				if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > 2*beaconTimeout {
+				if !lastBeaconTime.IsZero() && time.Since(lastBeaconTime) > BeaconTimeout {
 					if v.state != StateIdle {
-						slog.Warn("[Vehicle] Lost beacon connection => State: IDLE",
-							"vehicle", v.ID, "state", v.state)
+						slog.Warn(
+							"[Vehicle] Lost beacon connection => State: IDLE",
+							"vehicle", v.ID, "state", v.state,
+						)
 					}
 					v.state = StateIdle
 					v.currentGateway = ""
@@ -187,8 +195,10 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				continue
 			}
 			// Nếu đã Idle thì cứ tiếp tục lắng nghe
-			slog.Error("[Vehicle] Failed to read Lora",
-				"vehicle", v.ID, "state", v.state, "error", err)
+			slog.Error(
+				"[Vehicle] Failed to read Lora",
+				"vehicle", v.ID, "state", v.state, "error", err,
+			)
 			// time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -196,15 +206,19 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 		// Phân loại gói tin
 		var generic map[string]any
 		if err := cbor.Unmarshal(frame, &generic); err != nil {
-			slog.Warn("[Vehicle] Received unknown or corrupted CBOR packet",
-				"vehicle", v.ID, "state", v.state, "err", err)
+			slog.Warn(
+				"[Vehicle] Received unknown or corrupted CBOR packet",
+				"vehicle", v.ID, "state", v.state, "error", err,
+			)
 			continue
 		}
 
 		msgType, ok := generic["type"].(string)
 		if !ok {
-			slog.Warn("[Vehicle] Packet type missing",
-				"vehicle", v.ID, "state", v.state)
+			slog.Warn(
+				"[Vehicle] Packet type missing",
+				"vehicle", v.ID, "state", v.state,
+			)
 			continue
 		}
 
@@ -213,12 +227,17 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 			var beacon model.BeaconMessage
 			if err := cbor.Unmarshal(frame, &beacon); err != nil {
 				// Có thể là packet Control hoặc nhiễu
-				slog.Info("[Vehicle] Received non-beacon frame or corrupted beacon",
-					"vehicle", v.ID, "state", v.state, "error", err)
+				slog.Info(
+					"[Vehicle] Received non-beacon frame or corrupted beacon",
+					"vehicle", v.ID, "state", v.state, "error", err,
+				)
 				continue
 			}
-			slog.Info("[Vehicle] Received BEACON",
-				"vehicle", v.ID, "state", v.state, "source", beacon.GatewayAddress)
+			slog.Info(
+				"[Vehicle] Received BEACON",
+				"vehicle", v.ID, "state", v.state,
+				"source", beacon.GatewayAddress,
+			)
 
 			// record last beacon time and timestamp (ms)
 			lastBeaconTime = time.Now()
@@ -228,32 +247,43 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				var control model.ControlData
 				if err := cbor.Unmarshal(frame, &control); err != nil {
 					// Có thể là packet Control hoặc nhiễu
-					slog.Info("[Vehicle] Received non-control frame or corrupted control",
-						"vehicle", v.ID, "state", v.state, "error", err)
+					slog.Info(
+						"[Vehicle] Received non-control frame or corrupted control",
+						"vehicle", v.ID, "state", v.state, "error", err,
+					)
 					continue
 				}
 				slog.Info("[Vehicle] Received CONTROL",
 					"vehicle", v.ID, "state", v.state)
 				if control.VehicleID != v.ID {
-					slog.Debug("[Vehicle] Not target control",
-						"vehicle", v.ID, "target", control.VehicleID)
+					slog.Debug(
+						"[Vehicle] Not target control",
+						"vehicle", v.ID, "target", control.VehicleID,
+					)
 					continue
 				}
-				arduinoControl := fmt.Sprintf("%d,%.6f,%.6f,%.6f,%.6f,%.6f",
+				arduinoControl := fmt.Sprintf(
+					"%d,%.6f,%.6f,%.6f,%.6f,%.6f",
 					control.Speed, control.Latitude, control.Longitude,
 					control.Kp, control.Ki, control.Kd)
 				// Forward control data to Arduino
 				if err := v.arduino.Write(arduinoControl); err != nil {
-					slog.Error("[Vehicle] Failed to forward control to Arduino",
-						"vehicle", v.ID, "state", v.state, "error", err)
+					slog.Error(
+						"[Vehicle] Failed to forward control to Arduino",
+						"vehicle", v.ID, "state", v.state, "error", err,
+					)
 				} else {
-					slog.Info("[Vehicle] Forwarded CONTROL to Arduino",
-						"vehicle", v.ID, "state", v.state)
+					slog.Info(
+						"[Vehicle] Forwarded CONTROL to Arduino",
+						"vehicle", v.ID, "state", v.state,
+					)
 				}
 			}
 		default:
-			slog.Info("[Vehicle] Received unhandled message type",
-				"vehicle", v.ID, "state", v.state, "type", msgType)
+			slog.Info(
+				"[Vehicle] Received unhandled message type",
+				"vehicle", v.ID, "state", v.state, "type", msgType,
+			)
 		}
 	}
 }
@@ -264,8 +294,10 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 	isRoaming := v.currentGateway != "" && v.currentGateway != b.GatewayAddress
 	v.mutexOffset.Lock()
 	if isRoaming {
-		slog.Info("[Vehicle] Roaming detected - Resetting Sync",
-			"old", v.currentGateway, "new", b.GatewayAddress)
+		slog.Info(
+			"[Vehicle] Roaming detected - Resetting Sync",
+			"old", v.currentGateway, "new", b.GatewayAddress,
+		)
 		// Reset về trạng thái chưa đồng bộ để bắt đầu tính lại từ đầu với Gateway mới
 		v.bestOffset = math.MaxInt64
 	}
@@ -287,8 +319,11 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		v.currentGateway = b.GatewayAddress
 		v.state = StateIdle // Reset về Idle để đăng ký lại với Gateway mới
 		v.assignedSlot = -1
-		slog.Info("[Vehicle] Roaming detected => Preparing to switch",
-			"vehicle", v.ID, "state", v.state, "old", v.currentGateway, "new", b.GatewayAddress)
+		slog.Info(
+			"[Vehicle] Roaming detected => Preparing to switch",
+			"vehicle", v.ID, "state", v.state,
+			"old", v.currentGateway, "new", b.GatewayAddress,
+		)
 
 		// sleep until register window
 		v.sleepUntil(ctx, registerTime)
@@ -311,12 +346,16 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		}
 		payload, _ := cbor.Marshal(hello)
 		if err := v.lora.WriteLine(payload); err != nil {
-			slog.Warn("[Vehicle] Failed to send HELLO during roaming",
-				"vehicle", v.ID, "state", v.state, "err", err)
+			slog.Warn(
+				"[Vehicle] Failed to send HELLO during roaming",
+				"vehicle", v.ID, "state", v.state, "error", err,
+			)
 		} else {
 			v.state = StateJoining
-			slog.Info("[Vehicle] Sent HELLO (Roaming)",
-				"vehicle", v.ID, "state", v.state)
+			slog.Info(
+				"[Vehicle] Sent HELLO (Roaming)",
+				"vehicle", v.ID, "state", v.state,
+			)
 		}
 		return
 	}
@@ -346,12 +385,16 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		}
 		payload, _ := cbor.Marshal(msg)
 		if err := v.lora.WriteLine(payload); err != nil {
-			slog.Warn("[Vehicle] Failed to write HELLO",
-				"vehicle", v.ID, "state", v.state, "err", err)
+			slog.Warn(
+				"[Vehicle] Failed to write HELLO",
+				"vehicle", v.ID, "state", v.state, "error", err,
+			)
 		} else {
 			v.state = StateJoining
-			slog.Info("[Vehicle] Sent HELLO",
-				"vehicle", v.ID, "state", v.state)
+			slog.Info(
+				"[Vehicle] Sent HELLO",
+				"vehicle", v.ID, "state", v.state,
+			)
 		}
 
 	case StateJoining:
@@ -359,20 +402,26 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		if slot, ok := b.SlotMap[v.ID]; ok {
 			v.assignedSlot = slot
 			v.state = StateSending
-			slog.Info("[Vehicle] Joined successfully",
-				"vehicle", v.ID, "state", v.state, "slot", slot)
+			slog.Info(
+				"[Vehicle] Joined successfully",
+				"vehicle", v.ID, "state", v.state, "slot", slot,
+			)
 			go v.performTDMA(ctx, b, localCycleStart)
 		} else {
 			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
-			slog.Warn("[Vehicle] Waiting for slot assignment...",
-				"vehicle", v.ID, "state", v.state)
+			slog.Warn(
+				"[Vehicle] Waiting for slot assignment...",
+				"vehicle", v.ID, "state", v.state,
+			)
 
 			// sleep to send HELLO (retry)
 			v.sleepUntil(ctx, registerTime)
 			if v.assignedSlot != -1 {
 				v.state = StateSending
-				slog.Info("[Vehicle] Slot assigned during wait => Skip resend",
-					"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot)
+				slog.Info(
+					"[Vehicle] Slot assigned during wait => Skip resend",
+					"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
+				)
 				// start TDMA for this cycle if possible
 				go v.performTDMA(ctx, b, localCycleStart)
 				return
@@ -384,11 +433,15 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			}
 			payload, _ := cbor.Marshal(msg)
 			if err := v.lora.WriteLine(payload); err != nil {
-				slog.Warn("[Vehicle] Failed to write HELLO (retry)",
-					"vehicle", v.ID, "state", v.state, "err", err)
+				slog.Warn(
+					"[Vehicle] Failed to write HELLO (retry)",
+					"vehicle", v.ID, "state", v.state, "error", err,
+				)
 			} else {
-				slog.Info("[Vehicle] Sent HELLO (Retry)",
-					"vehicle", v.ID, "state", v.state)
+				slog.Info(
+					"[Vehicle] Sent HELLO (Retry)",
+					"vehicle", v.ID, "state", v.state,
+				)
 			}
 			// State vẫn là Joining
 		}
@@ -401,8 +454,10 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		} else {
 			v.state = StateIdle
 			v.assignedSlot = -1
-			slog.Warn("[Vehicle] Lost slot allocation",
-				"vehicle", v.ID, "state", v.state)
+			slog.Warn(
+				"[Vehicle] Lost slot allocation",
+				"vehicle", v.ID, "state", v.state,
+			)
 		}
 	}
 }
@@ -410,28 +465,29 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 // performTDMA now accepts ctx and uses sleepUntilSlot to schedule transmission
 func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localCycleStart time.Time) {
 	if v.assignedSlot < 1 {
-		slog.Warn("[Vehicle] Invalid slot => Skipping TDMA",
-			"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot)
+		slog.Warn(
+			"[Vehicle] Invalid slot => Skipping TDMA",
+			"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
+		)
 		return
 	}
 
 	slotIndex := v.assignedSlot - 1
-	slotStart := localCycleStart.Add(5*time.Millisecond +
-		time.Duration(
-			b.BeaconWindowMs+
-				b.ControlWindowMs+
-				b.GuardTimeMs+
-				b.RegisterWindowMs+
-				b.GuardTimeMs+
-				(b.SlotWindowMs+b.GuardTimeMs)*int64(slotIndex))*time.Millisecond)
+	slotStart := localCycleStart.Add(time.Duration(
+		b.BeaconWindowMs+
+			b.ControlWindowMs+
+			b.GuardTimeMs+
+			b.RegisterWindowMs+
+			b.GuardTimeMs+
+			(b.SlotWindowMs+b.GuardTimeMs)*int64(slotIndex)) * time.Millisecond)
 	v.sleepUntil(ctx, slotStart)
 
 	// Re-check assigned slot hasn't changed
 	if v.assignedSlot-1 != slotIndex {
-		slog.Info("[Vehicle] Assigned slot changed before transmit => Skipping",
+		slog.Info(
+			"[Vehicle] Assigned slot changed before transmit => Skipping",
 			"vehicle", v.ID, "state", v.state,
-			"slotIndex", slotIndex,
-			"currentSlot", v.assignedSlot,
+			"slotIndex", slotIndex, "currentSlot", v.assignedSlot,
 		)
 		return
 	}
@@ -454,15 +510,17 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localC
 	}
 	payload, _ := cbor.Marshal(pkt)
 	if err := v.lora.WriteLine(payload); err != nil {
-		slog.Warn("[Vehicle] Failed to send TELEMETRY", "vehicle", v.ID, "state", v.state, "err", err)
+		slog.Warn(
+			"[Vehicle] Failed to send TELEMETRY",
+			"vehicle", v.ID, "state", v.state, "error", err,
+		)
 		return
 	}
-	slog.Info("[Vehicle] Sent TELEMETRY (TDMA)",
+	slog.Info(
+		"[Vehicle] Sent TELEMETRY (TDMA)",
 		"vehicle", v.ID,
-		"state", v.state,
-		"slot", v.assignedSlot,
-		"lat", data.Latitude,
-		"lon", data.Longitude,
+		"state", v.state, "slot", v.assignedSlot,
+		"lat", data.Latitude, "lon", data.Longitude,
 	)
 }
 

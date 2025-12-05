@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -21,12 +23,18 @@ import (
 
 const (
 	// Thông số TDMA cố định
-	LoraDuration     = int64(1000)
+	LoraDuration     = int64(2000)
 	GuardTimeMs      = LoraDuration
 	SlotWindowMs     = LoraDuration
 	BeaconWindowMs   = LoraDuration
 	ControlWindowMs  = LoraDuration * 2
 	RegisterWindowMs = LoraDuration * 2
+
+	ReadTimeout    = 100 * time.Millisecond
+	HTTPTimeout    = 5 * time.Second
+	ContextTimeout = 3 * time.Second
+
+	ControlQueue = 50
 )
 
 // Gateway là đại diện cho thiết bị Gateway LoRaWAN
@@ -54,9 +62,9 @@ func NewGateway(
 		Address:       address,
 		ServerAddress: serverAddress,
 		lora:          device.NewLora(loraDev, loraBaud),
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		httpClient:    &http.Client{Timeout: HTTPTimeout},
 		currentSlots:  make(map[string]int),
-		controlQueue:  make(chan model.ControlData, 50),
+		controlQueue:  make(chan model.ControlData, ControlQueue),
 	}
 }
 
@@ -83,8 +91,10 @@ func (g *Gateway) Stop() {
 
 	if g.lora != nil {
 		if err := g.lora.Close(); err != nil {
-			slog.Warn("[Gateway] Failed to close LoRa device",
-				"gateway", g.Address, "error", err)
+			slog.Warn(
+				"[Gateway] Failed to close LoRa device",
+				"gateway", g.Address, "error", err,
+			)
 		}
 	}
 
@@ -109,23 +119,35 @@ func (g *Gateway) startHTTPServer(ctx context.Context) {
 
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("[Gateway] HTTP server error", "gateway", g.Address, "error", err)
+			slog.Error(
+				"[Gateway] HTTP server error",
+				"gateway", g.Address, "error", err,
+			)
 		}
 	}()
 
 	<-ctx.Done()
-	ctxShutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), HTTPTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctxShutdown); err != nil {
-		slog.Error("[Gateway] HTTP server shutdown failed", "gateway", g.Address, "error", err)
+		slog.Error(
+			"[Gateway] HTTP server shutdown failed",
+			"gateway", g.Address, "error", err,
+		)
 	} else {
-		slog.Info("[Gateway] HTTP server shutdown clean", "gateway", g.Address)
+		slog.Info(
+			"[Gateway] HTTP server shutdown clean",
+			"gateway", g.Address,
+		)
 	}
 }
 
 // handleBeaconUpdate: Nhận Slot Map mới từ Server (khi có đăng ký/hết hạn session)
 func (g *Gateway) handleBeaconUpdate(w http.ResponseWriter, r *http.Request) {
-	defer func() { _ = r.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}()
 	var newMap map[string]int
 	if err := json.NewDecoder(r.Body).Decode(&newMap); err != nil {
 		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
@@ -135,16 +157,19 @@ func (g *Gateway) handleBeaconUpdate(w http.ResponseWriter, r *http.Request) {
 	g.slotMutex.Lock()
 	g.currentSlots = newMap
 	g.slotMutex.Unlock()
-	slog.Info("[Gateway] Beacon slots updated by Server",
-		"gateway", g.Address,
-		"count", len(newMap),
+	slog.Info(
+		"[Gateway] Updated beacon slots",
+		"gateway", g.Address, "count", len(newMap),
 	)
 
 	w.WriteHeader(http.StatusOK)
 }
 
 func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
-	defer func() { _ = r.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}()
 
 	var controlJSON model.ControlData
 	if err := json.NewDecoder(r.Body).Decode(&controlJSON); err != nil {
@@ -155,8 +180,10 @@ func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
 	// Đưa vào queue để gửi ở CONTROL frame
 	select {
 	case g.controlQueue <- controlJSON:
-		slog.Info("[Gateway] Queued CONTROL",
-			"gateway", g.Address, "vehicle", controlJSON.VehicleID)
+		slog.Info(
+			"[Gateway] Queued CONTROL",
+			"gateway", g.Address, "vehicle", controlJSON.VehicleID,
+		)
 	default:
 		slog.Warn("[Gateway] Control queue FULL, dropping control!")
 	}
@@ -179,12 +206,10 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		}
 
 		if time.Until(nextCycleStart) > 0 {
-			slog.Info("[Gateway] Sleep to next Cycle",
-				"gateway", g.Address)
+			slog.Debug("[Gateway] Sleep to next Cycle", "gateway", g.Address)
 			g.sleepUntil(ctx, nextCycleStart)
 		} else {
-			slog.Warn("[Gateway] Resync Cycle",
-				"gateway", g.Address)
+			slog.Debug("[Gateway] Resync Cycle", "gateway", g.Address)
 			nextCycleStart = time.Now()
 		}
 
@@ -207,20 +232,32 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		nextCycleStart = slotsEnd
 
 		// === BEACON WINDOW ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Beacon")
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Beacon",
+		)
 		g.sendBeacon(cycleStartMs, slots)
 		g.sleepUntil(ctx, beaconEnd)
 
 		// === CONTROL WINDOW ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Control")
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Control",
+		)
 		g.processControl(ctx, controlEnd)
 
 		// === LORA LISTENING ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "Listen")
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Listen",
+		)
 		g.listenUntil(ctx, slotsEnd)
 		// g.sleepUntil(ctx, registerEnd)
 		// === END CYCLE ===
-		slog.Info("[Gateway] Cycle Status", "gateway", g.Address, "status", "End")
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "End",
+		)
 	}
 }
 
@@ -239,8 +276,10 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 
 	payload, err := cbor.Marshal(beacon)
 	if err != nil {
-		slog.Error("[Gateway] Failed to marshal BEACON",
-			"gateway", g.Address, "error", err)
+		slog.Error(
+			"[Gateway] Failed to marshal BEACON",
+			"gateway", g.Address, "error", err,
+		)
 		return
 	}
 
@@ -248,9 +287,9 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 		slog.Error("[Gateway] Failed to send BEACON",
 			"gateway", g.Address, "error", err)
 	} else {
-		slog.Info("[Gateway] Sent BEACON",
-			"gateway", g.Address,
-			"slotCount", len(slots),
+		slog.Info(
+			"[Gateway] Sent BEACON",
+			"gateway", g.Address, "slotCount", len(slots),
 		)
 	}
 }
@@ -259,17 +298,23 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 func (g *Gateway) sendControl(ctrl model.ControlData) {
 	payload, err := cbor.Marshal(ctrl)
 	if err != nil {
-		slog.Error("[Gateway] Control marshal error",
-			"gateway", g.Address, "error", err)
+		slog.Error(
+			"[Gateway] Control marshal error",
+			"gateway", g.Address, "error", err,
+		)
 		return
 	}
 
 	if err := g.lora.WriteLine(payload); err != nil {
-		slog.Error("[Gateway] Failed to send CONTROL",
-			"gateway", g.Address, "vehicle", ctrl.VehicleID, "error", err)
+		slog.Error(
+			"[Gateway] Failed to send CONTROL",
+			"gateway", g.Address, "vehicle", ctrl.VehicleID, "error", err,
+		)
 	} else {
-		slog.Info("[Gateway] Sent CONTROL",
-			"gateway", g.Address, "vehicle", ctrl.VehicleID)
+		slog.Info(
+			"[Gateway] Sent CONTROL",
+			"gateway", g.Address, "vehicle", ctrl.VehicleID,
+		)
 	}
 }
 
@@ -291,7 +336,6 @@ func (g *Gateway) sleepUntil(ctx context.Context, deadline time.Time) {
 
 // listenUntil: Lắng nghe LoRa liên tục cho đến thời điểm deadline
 func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
-	// const timeout = 100 * time.Millisecond
 	for {
 		// 1. Kiểm tra Context
 		select {
@@ -302,14 +346,14 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 
 		// 2. Kiểm tra Deadline
 		remaining := time.Until(deadline)
-		// slog.Debug("[Listen]", "remain", remaining)
-		// if remaining < timeout {
-		// 	g.sleepUntil(ctx, deadline)
-		// 	return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
-		// }
+		slog.Debug("[Listen]", "remain", remaining)
+		if remaining < ReadTimeout {
+			g.sleepUntil(ctx, deadline)
+			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
+		}
 
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.ReadLine(remaining)
+		frame, err := g.lora.ReadLine(ReadTimeout)
 		if err != nil {
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
 			if err == device.ErrTimeout { // Nhớ dùng biến lỗi chung device.ErrTimeout
@@ -317,9 +361,11 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 				continue
 			}
 			// Lỗi khác (IO error)
-			slog.Error("[Gateway] Fail to read Lora",
-				"gateway", g.Address, "error", err)
-			// time.Sleep(timeout / 4) // Nghỉ chút tránh spam log
+			slog.Error(
+				"[Gateway] Fail to read Lora",
+				"gateway", g.Address, "error", err,
+			)
+			time.Sleep(ReadTimeout / 4) // Nghỉ chút tránh spam log
 			continue
 		}
 
@@ -344,8 +390,10 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 func (g *Gateway) processLora(frame []byte) {
 	var generic map[string]any
 	if err := cbor.Unmarshal(frame, &generic); err != nil {
-		slog.Warn("[Gateway] Corrupted packet",
-			"gateway", g.Address, "error", err)
+		slog.Warn(
+			"[Gateway] Corrupted packet",
+			"gateway", g.Address, "error", err,
+		)
 		return
 	}
 
@@ -359,8 +407,10 @@ func (g *Gateway) processLora(frame []byte) {
 	case model.PacketHello:
 		var hello model.HelloMessage
 		if err := cbor.Unmarshal(frame, &hello); err == nil {
-			slog.Info("[Gateway] Received HELLO",
-				"gateway", g.Address, "vehicle", hello.VehicleID)
+			slog.Info(
+				"[Gateway] Received HELLO",
+				"gateway", g.Address, "vehicle", hello.VehicleID,
+			)
 			g.postRegisterToServer(hello.VehicleID)
 		}
 	case model.PacketTelemetry:
@@ -371,12 +421,16 @@ func (g *Gateway) processLora(frame []byte) {
 			g.slotMutex.Unlock()
 
 			if exists {
-				slog.Info("[Gateway] Received TELEMETRY",
-					"gateway", g.Address, "vehicle", telemetry.VehicleID)
+				slog.Info(
+					"[Gateway] Received TELEMETRY",
+					"gateway", g.Address, "vehicle", telemetry.VehicleID,
+				)
 				g.postTelemetryToServer(telemetry)
 			} else {
-				slog.Warn("[Gateway] Ignored TELEMETRY (No Slot)",
-					"gateway", g.Address, "vehicle", telemetry.VehicleID)
+				slog.Warn(
+					"[Gateway] Ignored TELEMETRY (No Slot)",
+					"gateway", g.Address, "vehicle", telemetry.VehicleID,
+				)
 			}
 		}
 	}
@@ -384,18 +438,14 @@ func (g *Gateway) processLora(frame []byte) {
 
 // processControlQueue: Gửi các lệnh trong hàng đợi cho đến khi hết giờ hoặc hết hàng đợi
 func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
-	// packetDuration := time.Duration(LoraDuration) * time.Millisecond
-	const timout = 100 * time.Millisecond
 	for {
 		// 1. Tính thời gian còn lại trước khi hết giờ
-		// controlEnd := time.Now().Add(packetDuration)
 		remaining := time.Until(deadline)
 
 		// 2. Kiểm tra ngân sách thời gian (Time Budget)
 		// Nếu thời gian còn lại < thời gian cần gửi 1 gói -> Dừng ngay
-		// if remaining < packetDuration {
-		if remaining < timout {
-			// slog.Debug("[Gateway] Not enough time for new packet, closing window")
+		if remaining < ReadTimeout {
+			slog.Debug("[Gateway] Not enough time for new packet => Closing window")
 			g.sleepUntil(ctx, deadline)
 			return
 		}
@@ -405,43 +455,50 @@ func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 			return
 		case ctrl := <-g.controlQueue:
 			g.sendControl(ctrl)
-			time.Sleep(timout / 4)
-			// g.sleepUntil(ctx, controlEnd)
+			time.Sleep(ReadTimeout / 4)
 		default:
-			// g.sleepUntil(ctx, controlEnd)
 			continue
 		}
 	}
 }
 
+// Helper function để tái sử dụng code gửi request
+func (g *Gateway) sendJSONRequest(ctx context.Context, method, url string, payload any) (*http.Response, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal error: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("create request error: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Thực hiện request
+	return g.httpClient.Do(req)
+}
+
 // postRegisterToServer: Gửi yêu cầu đăng ký lên Server
 func (g *Gateway) postRegisterToServer(vehicleID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ContextTimeout)
 	defer cancel()
 
 	register := model.RegisterRequest{
 		GatewayAddress: g.Address,
 		VehicleID:      vehicleID,
 	}
-	payload, _ := json.Marshal(register)
-	req, err := http.NewRequestWithContext(ctx,
-		"POST",
-		"http://"+g.ServerAddress+"/register",
-		bytes.NewReader(payload),
-	)
-	if err != nil {
-		slog.Error("[Gateway] Failed to build register request",
-			"gateway", g.Address, "error", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
 
 	slog.Info(
 		"[Gateway] Sending REGISTER",
-		"gateway", g.Address,
-		"vehicle", vehicleID,
+		"gateway", g.Address, "vehicle", vehicleID,
 	)
-	resp, err := g.httpClient.Do(req)
+	url := fmt.Sprintf("http://%s/register", g.ServerAddress)
+	resp, err := g.sendJSONRequest(ctx, "POST", url, register)
 	if err != nil {
 		slog.Error(
 			"[Gateway] Failed to POST register to Server",
@@ -449,11 +506,16 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 		)
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("[Gateway] Server rejected registration",
-			"gateway", g.Address, "status", resp.Status)
+		slog.Warn(
+			"[Gateway] Server rejected registration",
+			"gateway", g.Address, "status", resp.Status,
+		)
 		return
 	}
 
@@ -461,8 +523,10 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 	var registerResponse model.RegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&registerResponse); err != nil && err != http.ErrBodyReadAfterClose {
 		// decode error is non-fatal but log
-		slog.Warn("[Gateway] Failed to parse register response",
-			"gateway", g.Address, "error", err)
+		slog.Debug(
+			"[Gateway] Failed to parse register response",
+			"gateway", g.Address, "error", err,
+		)
 	} else {
 		slog.Info(
 			"[Gateway] Register accepted by server",
@@ -474,30 +538,16 @@ func (g *Gateway) postRegisterToServer(vehicleID string) {
 
 // postTelemetryToServer: Gửi dữ liệu Telemetry lên Server
 func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ContextTimeout)
 	defer cancel()
-	// Gửi VehicleData lên Server để reset TTL session
-	body, _ := json.Marshal(data)
-	req, err := http.NewRequestWithContext(ctx,
-		"POST",
-		"http://"+g.ServerAddress+"/telemetry",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		slog.Error("[Gateway] Failed to build telemetry request",
-			"gateway", g.Address, "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
 
 	slog.Info(
 		"[Gateway] Sending TELEMETRY",
-		"gateway", g.Address,
-		"vehicle", data.VehicleID,
-		"lat", data.Latitude,
-		"lon", data.Longitude,
+		"gateway", g.Address, "vehicle", data.VehicleID,
+		"lat", data.Latitude, "lon", data.Longitude,
 	)
-	resp, err := g.httpClient.Do(req)
+	url := fmt.Sprintf("http://%s/telemetry", g.ServerAddress)
+	resp, err := g.sendJSONRequest(ctx, "POST", url, data)
 	if err != nil {
 		slog.Error(
 			"[Gateway] Failed to POST telemetry to Server",
@@ -505,5 +555,17 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 		)
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn(
+			"[Gateway] Server rejected telemetry",
+			"gateway", g.Address, "status", resp.Status,
+		)
+		return
+	}
 }

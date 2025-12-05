@@ -1,12 +1,4 @@
 // Command lora runs the LoraFog system orchestrator.
-//
-// CHANGELOG (refactor v2):
-// - Unified startup with structured logging and graceful shutdown
-// - Integrated util.SetupLogger()
-// - Uses context cancellation on SIGINT/SIGTERM
-// - Validates YAML configuration before launch
-// - Safe close sequence for System
-// - Clean exit codes and consistent logs
 
 package main
 

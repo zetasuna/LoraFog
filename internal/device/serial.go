@@ -93,6 +93,7 @@ func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
 		// 4. Kiểm tra ký tự xuống dòng
 		if char == '\n' {
 			// Đã tìm thấy kết thúc dòng -> Thành công
+			slog.Debug("[Serial] Receive bytes", "count", len(lineBuf))
 			return string(lineBuf), nil
 		}
 

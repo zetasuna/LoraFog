@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"LoraFog/internal/model"
+	"LoraFog/internal/util"
 )
 
 // Arduino represents a serial connection to an Arduino controller.
@@ -23,8 +24,10 @@ type Arduino struct {
 func NewArduino(dev string, baud int) *Arduino {
 	s, err := NewSerial(dev, baud)
 	if err != nil {
-		slog.Warn("[Arduino] Failed to connect Arduino",
-			"device", dev, "error", err)
+		slog.Warn(
+			"[Arduino] Failed to connect Arduino",
+			"device", dev, "error", err,
+		)
 	}
 	return &Arduino{
 		Device: dev,
@@ -46,8 +49,7 @@ func (a *Arduino) Read(dataCh chan<- model.ArduinoData) (func(), error) {
 		for {
 			select {
 			case <-stop:
-				slog.Info("[Arduino] Stopping read loop",
-					"device", a.Device)
+				slog.Info("[Arduino] Stopping read loop", "device", a.Device)
 				return
 			default:
 			}
@@ -94,6 +96,10 @@ func (a *Arduino) Close() error {
 // StartSimulation generates synthetic telemetry data periodically for testing.
 func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 	// --- Simulation State ---
+	const (
+		DistanceStop = 5.0
+		PIDTimer     = 300 * time.Millisecond
+	)
 	var (
 		latNow  = 21.050299
 		lonNow  = 105.826633
@@ -105,7 +111,7 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 		baseSpeed = 1000.0
 		targetLat = 21.050295
 		targetLon = 105.826633
-		Kp        = 0.0
+		Kp        = 0.5
 		Ki        = 0.0
 		Kd        = 0.0
 	)
@@ -131,41 +137,49 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 
 	slog.Info("[Arduino] Starting simulation", "device", a.Device)
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(PIDTimer)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-stop:
-			slog.Info("[Arduino] Stopping simulation",
-				"device", a.Device)
+			slog.Info("[Arduino] Stopping simulation", "device", a.Device)
 			return nil
 		case line := <-readCh:
 			// EXPECT: speed,lat,lon,Kp,Ki,Kd
 			if _, err := fmt.Sscanf(line, "%f,%f,%f,%f,%f,%f",
 				&baseSpeed, &targetLat, &targetLon, &Kp, &Ki, &Kd,
 			); err == nil {
-				slog.Info("[Arduino] Simulation: Received new target",
-					"speed", baseSpeed, "lat", targetLat, "lon", targetLon)
+				slog.Info(
+					"[Arduino] Simulation: Received new target",
+					"speed", baseSpeed, "lat", targetLat, "lon", targetLon,
+				)
 			}
 		case <-ticker.C:
 			// --- 0. Khởi tạo giá trị motor mặc định (Dừng) ---
 			left := 1000.0
 			right := 1000.0
+			// Fix ki vs kd
+			Ki = 0.0
+			Kd = 0.0
 
 			// --- 1. Tính hướng cần đến ---
-			targetHead := bearing(latNow, lonNow, targetLat, targetLon)
-			dist := distanceMeters(latNow, lonNow, targetLat, targetLon)
+			targetHead := util.Bearing(latNow, lonNow, targetLat, targetLon)
+			dist := util.DistanceMeters(latNow, lonNow, targetLat, targetLon)
 			// LOGIC MỚI: Nếu gần đến đích (< 5m), ép tốc độ về 1000 (Dừng)
-			if dist < 2.0 {
+			if dist < DistanceStop {
 				baseSpeed = 1000.0
 			}
 
 			// --- 2. Logic di chuyển ---
 			// Chỉ di chuyển và tính PID nếu tốc độ > 1000
-			if baseSpeed > 1000 {
+			if baseSpeed <= 1000 {
+				// Nếu dừng, reset các tham số PID để tránh tích lũy sai số khi đứng yên
+				integral = 0
+				lastErr = 0
+			} else {
 				// --- PID Steering ---
-				err := normalizeAngle(targetHead - headNow)
+				err := util.NormalizeAngle(targetHead - headNow)
 				integral += err
 				derivative := err - lastErr
 				lastErr = err
@@ -176,17 +190,13 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 				left = baseSpeed + turn
 				right = baseSpeed - turn
 
-				left = clamp(left, 1000, 2000)
-				right = clamp(right, 1000, 2000)
+				left = util.Clamp(left, 1000, 2000)
+				right = util.Clamp(right, 1000, 2000)
 
 				// --- Mô phỏng tàu di chuyển một chút ---
-				headNow = normalizeAngle(headNow + turn*0.1)
-				latNow += (math.Cos(deg2rad(headNow)) * 0.00001)
-				lonNow += (math.Sin(deg2rad(headNow)) * 0.00001)
-			} else {
-				// Nếu dừng, reset các tham số PID để tránh tích lũy sai số khi đứng yên
-				integral = 0
-				lastErr = 0
+				headNow = util.NormalizeAngle(headNow + turn*0.1)
+				latNow += (math.Cos(util.Deg2rad(headNow)) * 0.00001)
+				lonNow += (math.Sin(util.Deg2rad(headNow)) * 0.00001)
 			}
 
 			// --- 3. Gửi dữ liệu như Arduino thật ---
@@ -197,54 +207,11 @@ func (a *Arduino) StartSimulation(stop <-chan struct{}) error {
 			)
 
 			if err := a.Write(line); err != nil {
-				slog.Warn("[Arduino] Failed to write simulated telemetry",
-					"device", a.Device, "error", err)
+				slog.Warn(
+					"[Arduino] Failed to write simulated telemetry",
+					"device", a.Device, "error", err,
+				)
 			}
 		}
 	}
-}
-
-func distanceMeters(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371000 // Bán kính trái đất (mét)
-	dLat := deg2rad(lat2 - lat1)
-	dLon := deg2rad(lon2 - lon1)
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(deg2rad(lat1))*math.Cos(deg2rad(lat2))*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return R * c
-}
-
-func bearing(lat1, lon1, lat2, lon2 float64) float64 {
-	rad1 := deg2rad(lat1)
-	rad2 := deg2rad(lat2)
-	delta := deg2rad(lon2 - lon1)
-
-	y := math.Sin(delta) * math.Cos(rad2)
-	x := math.Cos(rad1)*math.Sin(rad2) -
-		math.Sin(rad1)*math.Cos(rad2)*math.Cos(delta)
-
-	ans := math.Atan2(y, x)
-	return normalizeAngle(rad2deg(ans))
-}
-
-func deg2rad(d float64) float64 { return d * math.Pi / 180 }
-func rad2deg(r float64) float64 { return r * 180 / math.Pi }
-
-func normalizeAngle(a float64) float64 {
-	a = math.Mod(a+360, 360)
-	if a < 0 {
-		a += 360
-	}
-	return a
-}
-
-func clamp(v, min, max float64) float64 {
-	if v < min {
-		return min
-	}
-	if v > max {
-		return max
-	}
-	return v
 }
