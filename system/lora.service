@@ -1,12 +1,17 @@
 [Unit]
 Description=Lora Service (User)
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/home/pi/.local/bin/lora -c /etc/lora/config.yml
-Restart=on-failure
-RestartSec=3
+ExecStart=/home/pi/.local/bin/lora -c /home/pi/nam_project/LoraFog/configs/config_gateway.yml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lora
+
 
 [Install]
 WantedBy=default.target
