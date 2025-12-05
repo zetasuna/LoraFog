@@ -10,15 +10,18 @@ else
 fi
 
 # --- Copy service vào ~/.local/bin nếu file tồn tại ---
-mkdir -p "$HOME/.config/systemd/user"
+mkdir -p "$HOME/.config/systemd/user/"
 if [ ! -f "$HOME/.config/systemd/user/lora.service" ]; then
-  cp ./lora.service "$HOME/.config/systemd/user"
+  cp ./lora.service "$HOME/.config/systemd/user/"
 else
   echo "⚠️  Tìm thấy file lora.service — bỏ qua bước copy."
 fi
 
 # --- Tạo thư mục ~/.local/bin nếu chưa tồn tại ---
 mkdir -p "$HOME/.local/bin"
+
+# --- Tạo thư mụac /etc/lora nếu chưa tồn tại ---
+sudo mkdir -p "/etc/lora"
 
 # --- Thêm ~/.local/bin vào PATH nếu chưa có ---
 case ":$PATH:" in
