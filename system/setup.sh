@@ -10,7 +10,7 @@ else
 fi
 
 # --- Copy service vào ~/.local/bin nếu file tồn tại ---
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$HOME/.config/systemd/user"
 if [ ! -f "$HOME/.config/systemd/user/lora.service" ]; then
   cp ./lora.service "$HOME/.config/systemd/user"
 else
