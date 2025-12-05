@@ -18,17 +18,20 @@ type Lora struct {
 }
 
 // NewLora creates a new Lora.
-func NewLora(path string, baud int) *Lora {
+func NewLora(path string, baud int) (*Lora, error) {
 	serial, err := NewSerial(path, baud)
 	if err != nil {
-		slog.Warn("[Lora] Failed to connect Lora device",
+		slog.Debug("[Lora] Failed to connect Lora device",
 			"device", path, "error", err)
+		return nil, fmt.Errorf("lora: failed to connect device %s: %w", path, err)
 	}
-	return &Lora{
+
+	lora := &Lora{
 		Path:   path,
 		Baud:   baud,
 		serial: serial,
 	}
+	return lora, nil
 }
 
 // ReadLine reads a line from Serial, decodes Base64, and returns raw bytes.

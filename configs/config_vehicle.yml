@@ -1,0 +1,15 @@
+vehicles:
+  - id: "VH01"
+    lora_device: "/dev/lora"
+    lora_baud: 9600
+    arduino_device: "/tmp/ttyADR1"
+    # arduino_device: "/dev/arduino"
+    arduino_baud: 9600
+
+arduinos:
+  - device: "/tmp/ttyADS1"
+    baud: 9600
+
+virtual_serials:
+  - left: "/tmp/ttyADS1"
+    right: "/tmp/ttyADR1"

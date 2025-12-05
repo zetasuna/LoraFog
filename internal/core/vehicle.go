@@ -53,9 +53,15 @@ func NewVehicle(
 	id string,
 	loraDev string, loraBaud int,
 	arduinoDev string, arduinoBaud int,
-) *Vehicle {
-	lora := device.NewLora(loraDev, loraBaud)
-	v := &Vehicle{
+) (*Vehicle, error) {
+	lora, err := device.NewLora(loraDev, loraBaud)
+	if err != nil {
+		// Nếu không mở được cổng LoRa, trả về lỗi luôn
+		slog.Error("Failed to initialize Lora", "error", err)
+		return nil, err
+	}
+
+	vehicle := &Vehicle{
 		ID:           id,
 		lora:         lora,
 		state:        StateIdle,
@@ -63,9 +69,9 @@ func NewVehicle(
 		bestOffset:   math.MaxInt64,
 	}
 	if arduinoDev != "" {
-		v.arduino = device.NewArduino(arduinoDev, arduinoBaud)
+		vehicle.arduino = device.NewArduino(arduinoDev, arduinoBaud)
 	}
-	return v
+	return vehicle, nil
 }
 
 func (v *Vehicle) Start(ctx context.Context) error {

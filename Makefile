@@ -9,7 +9,9 @@ MAIN := cmd/lora_fog/main.go
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/$(APP_NAME)
 CONFIG := configs/config.yml
-TEST_CONFIG := configs/test.yml
+DEMO_CONFIG := configs/config_demo.yml
+VEHICLE_CONFIG := configs/config_vehicle.yml
+GATEWAY_CONFIG := configs/config_gateway.yml
 
 # Go parameters
 GO := go
@@ -40,8 +42,18 @@ run:
 
 .PHONY: demo
 demo:
-	@echo "🚀 Running LoraFog with config: $(TEST_CONFIG)..."
-	@$(GO) run $(MAIN) -c $(TEST_CONFIG)
+	@echo "🚀 Running LoraFog with config: $(DEMO_CONFIG)..."
+	@$(GO) run $(MAIN) -c $(DEMO_CONFIG)
+
+.PHONY: vehicle
+vehicle:
+	@echo "🚀 Running LoraFog with config: $(VEHICLE_CONFIG)..."
+	@$(GO) run $(MAIN) -c $(VEHICLE_CONFIG)
+
+.PHONY: gateway
+gateway:
+	@echo "🚀 Running LoraFog with config: $(GATEWAY_CONFIG)..."
+	@$(GO) run $(MAIN) -c $(GATEWAY_CONFIG)
 
 # Run with verbose output
 .PHONY: runv

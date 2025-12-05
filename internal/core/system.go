@@ -75,21 +75,29 @@ func NewSystem(path string) (*System, error) {
 		)
 	}
 	for _, g := range cfg.Gateways {
-		sys.gateways = append(sys.gateways, NewGateway(
+		gateway, err := NewGateway(
 			g.Address,
 			g.ServerAddress,
 			g.LoraDevice,
 			g.LoraBaud,
-		))
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init gateway %s: %w", g.Address, err)
+		}
+		sys.gateways = append(sys.gateways, gateway)
 	}
 	for _, v := range cfg.Vehicles {
-		sys.vehicles = append(sys.vehicles, NewVehicle(
+		vehicle, err := NewVehicle(
 			v.VehicleID,
 			v.LoraDevice,
 			v.LoraBaud,
 			v.ArduinoDevice,
 			v.ArduinoBaud,
-		))
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init vehicle %s: %w", v.VehicleID, err)
+		}
+		sys.vehicles = append(sys.vehicles, vehicle)
 	}
 	for _, a := range cfg.Arduinos {
 		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Device, a.Baud))
@@ -149,9 +157,6 @@ func (s *System) Stop() {
 	for _, ino := range s.arduinos {
 		_ = ino.Close()
 	}
-	// if s.server != nil {
-	// 	_ = s.server.Stop()
-	// }
 	if s.serverDB != nil {
 		_ = s.serverDB.Close()
 	}

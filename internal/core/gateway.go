@@ -57,15 +57,23 @@ type Gateway struct {
 func NewGateway(
 	address, serverAddress string,
 	loraDev string, loraBaud int,
-) *Gateway {
-	return &Gateway{
+) (*Gateway, error) {
+	lora, err := device.NewLora(loraDev, loraBaud)
+	if err != nil {
+		// Nếu không mở được cổng LoRa, trả về lỗi luôn
+		slog.Error("Failed to initialize Lora", "error", err)
+		return nil, err
+	}
+
+	gateway := &Gateway{
 		Address:       address,
 		ServerAddress: serverAddress,
-		lora:          device.NewLora(loraDev, loraBaud),
+		lora:          lora,
 		httpClient:    &http.Client{Timeout: HTTPTimeout},
 		currentSlots:  make(map[string]int),
 		controlQueue:  make(chan model.ControlData, ControlQueue),
 	}
+	return gateway, nil
 }
 
 // Start khởi động các tiến trình của Gateway

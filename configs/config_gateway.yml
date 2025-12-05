@@ -1,0 +1,5 @@
+gateways:
+  - address: "127.0.0.1:10001"
+    server_address: "127.0.0.1:10000"
+    lora_device: "/dev/lora"
+    lora_baud: 9600
