@@ -35,6 +35,7 @@ case ":$PATH:" in
 esac
 
 # --- Enable systemd user service ---
+systemctl --user daemon-reload
 systemctl --user enable lora
 
 echo "Hoàn tất"

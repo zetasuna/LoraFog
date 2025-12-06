@@ -260,7 +260,6 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 			"gateway", g.Address, "status", "Listen",
 		)
 		g.listenUntil(ctx, slotsEnd)
-		// g.sleepUntil(ctx, registerEnd)
 		// === END CYCLE ===
 		slog.Debug(
 			"[Gateway] Cycle Status",
@@ -356,7 +355,9 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 		remaining := time.Until(deadline)
 		slog.Debug("[Listen]", "remain", remaining)
 		if remaining < ReadTimeout {
-			g.sleepUntil(ctx, deadline)
+			if remaining > 0 {
+				g.sleepUntil(ctx, deadline)
+			}
 			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
 		}
 
@@ -394,7 +395,7 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 	}
 }
 
-// processUplink: Xử lý logic gói tin (tách từ uplinkLoop cũ)
+// processLora: Xử lý logic gói tin
 func (g *Gateway) processLora(frame []byte) {
 	var generic map[string]any
 	if err := cbor.Unmarshal(frame, &generic); err != nil {
@@ -444,17 +445,17 @@ func (g *Gateway) processLora(frame []byte) {
 	}
 }
 
-// processControlQueue: Gửi các lệnh trong hàng đợi cho đến khi hết giờ hoặc hết hàng đợi
+// processControl: Gửi các lệnh trong hàng đợi cho đến khi hết giờ hoặc hết hàng đợi
 func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
-	for {
-		// 1. Tính thời gian còn lại trước khi hết giờ
-		remaining := time.Until(deadline)
+	// Tạo timer để báo hết giờ
+	// time.Until(deadline) trả về khoảng thời gian còn lại
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
 
-		// 2. Kiểm tra ngân sách thời gian (Time Budget)
-		// Nếu thời gian còn lại < thời gian cần gửi 1 gói -> Dừng ngay
-		if remaining < ReadTimeout {
-			slog.Debug("[Gateway] Not enough time for new packet => Closing window")
-			g.sleepUntil(ctx, deadline)
+	for {
+		if time.Until(deadline) < ReadTimeout {
+			slog.Debug("[Gateway] Control window closing (time budget)")
+			// g.sleepUntil(ctx, deadline)
 			return
 		}
 
@@ -464,8 +465,10 @@ func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 		case ctrl := <-g.controlQueue:
 			g.sendControl(ctrl)
 			time.Sleep(ReadTimeout / 4)
-		default:
-			continue
+		case <-timer.C:
+			// Khi timer nổ (đúng thời điểm deadline), thoát vòng lặp
+			// Thay thế cho việc dùng sleepUntil
+			return
 		}
 	}
 }
