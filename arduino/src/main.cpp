@@ -19,6 +19,7 @@
 #define DEFAULT_LATITUDE 0.0
 #define DEFAULT_LONGITUDE 0.0
 #define DEFAULT_HEADING 0
+#define DEFAULT_PID 0.0
 #define UPDATE_INTERVAL 200
 #define DISTANCE_STOP 2.0 // 2m
 
@@ -98,11 +99,6 @@ void setup() {
   t_data.current_heading = DEFAULT_HEADING;
   t_data.desired_heading = DEFAULT_HEADING;
 
-  // init PID timebase
-  pid_last_time = millis();
-  pid_integral = 0.0;
-  pid_last_error = 0.0;
-
   stopBoat();
 }
 
@@ -139,6 +135,8 @@ void loop() {
 
 // === CONTROL BOAT ===
 void autoControl() {
+  current_heading = getHeading();
+
   if (has_target &&
       isAtTarget(latitude, longitude, c_data.latitude, c_data.longitude)) {
     has_target = false;
@@ -151,7 +149,6 @@ void autoControl() {
     return;
   }
 
-  current_heading = getHeading();
   int16_t turn_angle = (desired_heading - current_heading + 360) % 360;
   int16_t error = (turn_angle > 180) ? (turn_angle - 360) : turn_angle;
   error = constrain(error, -90, 90);
@@ -272,10 +269,6 @@ int16_t calculateBearing(float current_latitude, float current_longitude,
 
 // === PID CALCULATION ===
 float calculatePID(int16_t error) {
-  // int16_t left_speed =
-  //     c_data.cruise_speed + (c_data.kp * error * turn_direction);
-  // left_speed = constrain(left_speed, MIN_PPM, MAX_PPM);
-  // return left_speed;
   unsigned long now = millis();
   float dt = (now - pid_last_time) / 1000.0f;
   if (dt <= 0.0f)

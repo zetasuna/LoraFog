@@ -1,10 +1,10 @@
 server:
-  address: "127.0.0.1:10000"
+  address: "192.168.2.245:10000"
   app_address: "127.0.0.1:3001"
 
 gateways:
   - address: "127.0.0.1:10001"
-    server_address: "127.0.0.1:10000"
+    server_address: "192.168.2.245:10000"
     # lora_device: "/tmp/ttyGW1"
     lora_device: "/dev/lora1"
     lora_baud: 9600
