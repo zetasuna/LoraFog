@@ -1,73 +1,95 @@
-// Package model defines the core data structures exchanged between vehicles,
-// gateways, and the fog server, including telemetry and control messages.
+// Package model provides message definitions exchanged across components.
 package model
 
-type PacketType string
-
 const (
-	PacketTelemetry PacketType = "t"
-	PacketControl   PacketType = "c"
+	PacketTelemetry string = "t"
+	PacketControl   string = "c"
+	PacketBeacon    string = "b"
+	PacketHello     string = "h"
 )
 
-type Packet struct {
-	Type PacketType `json:"type"`
-	Data any        `json:"data"`
+// BeaconMessage broadcast bởi Gateway đầu mỗi chu kỳ TDMA.
+type BeaconMessage struct {
+	Type             string `json:"type" cbor:"type"` // "beacon"
+	GatewayAddress   string `json:"gateway_address" cbor:"gateway_address"`
+	GuardTimeMs      int64  `json:"guard_time_ms" cbor:"guard_time_ms"`
+	CycleStartMs     int64  `json:"cycle_start_ms" cbor:"cycle_start_ms"`
+	SlotWindowMs     int64  `json:"slot_window_ms" cbor:"slot_window_ms"`
+	BeaconWindowMs   int64  `json:"beacon_window_ms" cbor:"beacon_window_ms"`
+	ControlWindowMs  int64  `json:"control_window_ms" cbor:"control_window_ms"`
+	RegisterWindowMs int64  `json:"register_window_ms" cbor:"register_window_ms"`
+	// Map: VehicleID -> SlotIndex. Vehicle dựa vào đây để biết mình được gửi ở slot nào.
+	SlotMap map[string]int `json:"slot_map" cbor:"slot_map"`
 }
 
-// VehicleData represents telemetry information reported by a vehicle.
-// It is the common structure shared between vehicles, gateways and fog.
-type VehicleData struct {
-	VehicleID   string  `json:"boatId"`
-	Latitude    float64 `json:"lat"`
-	Longitude   float64 `json:"lon"`
-	CurrentHead int     `json:"head"`
-	TargetHead  int     `json:"targetHead"`
-	LeftSpeed   int     `json:"leftSpeed"`
-	RightSpeed  int     `json:"rightSpeed"`
+// HelloMessage gửi bởi Vehicle trong vùng Register Window để đăng ký.
+type HelloMessage struct {
+	Type      string `json:"type" cbor:"type"` // "hello"
+	VehicleID string `json:"vehicle" cbor:"vehicle"`
 }
 
-// ControlData represents a control command sent from Fog to a vehicle.
-// It can be encoded either as JSON or CSV depending on gateway configuration.
-type ControlData struct {
-	VehicleID string  `json:"boatId"`
-	Speed     int     `json:"speed"`
-	Latitude  float64 `json:"targetLat"`
-	Longitude float64 `json:"targetLon"`
-	Kp        float64 `json:"kp"`
-	Ki        float64 `json:"ki"`
-	Kd        float64 `json:"kd"`
+// RegisterRequest là cấu trúc Server nhận từ Gateway
+type RegisterRequest struct {
+	GatewayAddress string `json:"gateway_address"`
+	VehicleID      string `json:"vehicle_id"`
 }
 
-// ArduinoData represents telemetry data collected by arduino
+// RegisterResponse trả về slot cho Gateway (khi register thành công)
+type RegisterResponse struct {
+	Slot           int    `json:"slot"`
+	GatewayAddress string `json:"gateway_address"`
+}
+
+// ArduinoData giả lập dữ liệu thô từ Arduino/Cảm biến.
 type ArduinoData struct {
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	LeftSpeed   int     `json:"left_speed"`
-	RightSpeed  int     `json:"right_speed"`
-	CurrentHead int     `json:"current_head"`
-	TargetHead  int     `json:"target_head"`
+	Latitude    float64 `json:"latitude" cbor:"latitude"`
+	Longitude   float64 `json:"longitude" cbor:"longitude"`
+	CurrentHead int64   `json:"current_head" cbor:"current_head"`
+	TargetHead  int64   `json:"target_head" cbor:"target_head"`
+	LeftSpeed   int64   `json:"left_speed" cbor:"left_speed"`
+	RightSpeed  int64   `json:"right_speed" cbor:"right_speed"`
 }
 
-// ArduinoControl represents telemetry data collected by arduino
-type ArduinoControl struct {
-	CruiseSpeed int     `json:"cruise_speed"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	Kp          float64 `json:"kp"`
-	Ki          float64 `json:"ki"`
-	Kd          float64 `json:"kd"`
+// VehicleData là gói tin Telemetry gửi từ Vehicle lên Gateway.
+type VehicleData struct {
+	Type        string  `json:"type" cbor:"type"` // "telemetry"
+	VehicleID   string  `json:"vehicle_id" cbor:"vehicle_id"`
+	Latitude    float64 `json:"latitude" cbor:"latitude"`
+	Longitude   float64 `json:"longitude" cbor:"longitude"`
+	CurrentHead int64   `json:"current_head" cbor:"current_head"`
+	TargetHead  int64   `json:"target_head" cbor:"target_head"`
+	LeftSpeed   int64   `json:"left_speed" cbor:"left_speed"`
+	RightSpeed  int64   `json:"right_speed" cbor:"right_speed"`
 }
 
-// GpsData represents a simple latitude/longitude reading.
-type GpsData struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
+type VehicleApp struct {
+	VehicleID   string  `json:"boatId" cbor:"vehicle_id"`
+	Latitude    float64 `json:"lat" cbor:"latitude"`
+	Longitude   float64 `json:"lon" cbor:"longitude"`
+	CurrentHead int64   `json:"head" cbor:"current_head"`
+	TargetHead  int64   `json:"targetHead" cbor:"target_head"`
+	LeftSpeed   int64   `json:"leftSpeed" cbor:"left_speed"`
+	RightSpeed  int64   `json:"rightSpeed" cbor:"right_speed"`
 }
 
-// GatewayRegistration represents information sent by a gateway
-// to the fog when registering itself.
-type GatewayRegistration struct {
-	GatewayID string   `json:"gateway_id"`
-	URL       string   `json:"url"`
-	Vehicles  []string `json:"vehicles"`
+// ControlData là gói tin điều khiển gửi từ Gateway xuống Vehicle.
+type ControlData struct {
+	Type      string  `json:"type" cbor:"type"` // "control"
+	VehicleID string  `json:"vehicle_id" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"latitude" cbor:"latitude"`
+	Longitude float64 `json:"longitude" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
+}
+
+type ControlApp struct {
+	VehicleID string  `json:"boatId" cbor:"vehicle_id"`
+	Speed     int     `json:"speed" cbor:"speed"`
+	Latitude  float64 `json:"targetLat" cbor:"latitude"`
+	Longitude float64 `json:"targetLon" cbor:"longitude"`
+	Kp        float64 `json:"kp" cbor:"kp"`
+	Ki        float64 `json:"ki" cbor:"ki"`
+	Kd        float64 `json:"kd" cbor:"kd"`
 }

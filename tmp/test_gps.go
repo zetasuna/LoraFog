@@ -15,7 +15,7 @@ func main() {
 		BaudRate: 9600, // phải trùng với tốc độ Serial.begin() trong Arduino
 	}
 
-	port, err := serial.Open("/dev/arduino", mode)
+	port, err := serial.Open("/dev/lora1", mode)
 	if err != nil {
 		log.Fatalf("Không thể mở cổng serial: %v", err)
 	}

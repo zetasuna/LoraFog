@@ -1,279 +1,582 @@
+// Package core defines the Gateway component responsible for
+// bridging LoRa-connected vehicles with the FogServer
+// using CBOR (for LoRa) and JSON (for HTTP).
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"maps"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
-// Gateway represents a LoRa gateway instance that reads wire lines from a Device,
-// decodes using InParser, re-encodes using OutParser and forwards to FogServer.
+const (
+	// Thông số TDMA cố định
+	LoraDuration     = int64(2000)
+	GuardTimeMs      = LoraDuration
+	SlotWindowMs     = LoraDuration
+	BeaconWindowMs   = LoraDuration
+	ControlWindowMs  = LoraDuration * 2
+	RegisterWindowMs = LoraDuration * 2
+
+	ReadTimeout    = 100 * time.Millisecond
+	HTTPTimeout    = 5 * time.Second
+	ContextTimeout = 3 * time.Second
+
+	ControlQueue = 50
+)
+
+// Gateway là đại diện cho thiết bị Gateway LoRaWAN
 type Gateway struct {
-	ID         string
-	Device     device.Device
-	URL        string
-	FogURL     string
-	InParser   parser.Parser
-	OutParser  parser.Parser
-	WireIn     string // uplink Vehicle -> Gateway format
-	WireOut    string // uplink Gateway -> Fog format
-	Vehicles   []string
-	VehicleSet map[string]struct{}
-	server     *http.Server
-	stop       chan struct{}
-	wg         sync.WaitGroup
+	Address       string // Địa chỉ HTTP/TCP của Gateway (dùng làm ID)
+	ServerAddress string // Địa chỉ HTTP của Fog Server
+	lora          *device.Lora
+	httpClient    *http.Client
+
+	slotMutex    sync.Mutex
+	currentSlots map[string]int // Map VehicleID -> SlotIndex. Cập nhật từ Server.
+
+	controlQueue chan model.ControlData
+
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// NewGateway constructs a Gateway with device path and parsers.
-// If opening the serial device fails, the Device field may be nil and Start will be a no-op.
-func NewGateway(id, devPath string, baud int, URL string, fogURL string, wireIn string, wireOut string, in parser.Parser, out parser.Parser, vehicles []string) *Gateway {
-	dev, err := device.NewSerialDevice(devPath, baud)
+// NewGateway tạo một Gateway mới
+func NewGateway(
+	address, serverAddress string,
+	loraDev string, loraBaud int,
+) (*Gateway, error) {
+	lora, err := device.NewLora(loraDev, loraBaud)
 	if err != nil {
-		// log but continue: user may run gateway without physical device (e.g., test)
-		log.Printf("[gateway %s] open serial %s err: %v", id, devPath, err)
-	} else {
-		log.Printf("[gateway %s] open serial %s: success", id, devPath)
+		// Nếu không mở được cổng LoRa, trả về lỗi luôn
+		slog.Error("Failed to initialize Lora", "error", err)
+		return nil, err
 	}
-	g := &Gateway{
-		ID:         id,
-		Device:     dev,
-		URL:        URL,
-		FogURL:     fogURL,
-		WireIn:     wireIn,
-		WireOut:    wireOut,
-		InParser:   in,
-		OutParser:  out,
-		Vehicles:   vehicles,
-		VehicleSet: make(map[string]struct{}, len(vehicles)),
-		stop:       make(chan struct{}),
+
+	gateway := &Gateway{
+		Address:       address,
+		ServerAddress: serverAddress,
+		lora:          lora,
+		httpClient:    &http.Client{Timeout: HTTPTimeout},
+		currentSlots:  make(map[string]int),
+		controlQueue:  make(chan model.ControlData, ControlQueue),
 	}
-	for _, v := range vehicles {
-		g.VehicleSet[v] = struct{}{}
-	}
-	return g
+	return gateway, nil
 }
 
-// Start begins the gateway read/forward loop in a background goroutine.
-// Returns nil even if the underlying device is nil (no-op for testing).
-func (g *Gateway) Start() error {
-	if g.Device == nil {
-		log.Printf("[gateway %s] no serial device; running in headless mode", g.ID)
-		return nil
-	}
+// Start khởi động các tiến trình của Gateway
+func (g *Gateway) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	g.cancel = cancel
 
-	// Start uplink loop (Vehicle → Fog)
+	// 1. Khởi động HTTP Server để nhận lệnh từ Server (Control & Update Beacon)
 	g.wg.Add(1)
-	go g.loop()
+	go g.startHTTPServer(ctx)
 
-	// Start downlink HTTP handler (Fog → Vehicle)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/command", g.handleControl)
-	// port := g.URL[strings.LastIndex(g.URL, ":"):]
-	addr := g.URL
-	addr = strings.TrimPrefix(addr, "http://")
-	addr = strings.TrimPrefix(addr, "https://")
-	g.server = &http.Server{Addr: addr, Handler: mux}
-
+	// 2. Khởi động vòng lặp Lora
 	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		log.Printf("[gateway %s] HTTP listening at %s/command", g.ID, addr)
-		if err := g.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[gateway %s] HTTP error: %v", g.ID, err)
-		}
-	}()
+	go g.loraLoop(ctx)
 
+	slog.Info("[Gateway] Started", "gateway", g.Address)
 	return nil
 }
 
-// loop continuously reads lines from the Device, decodes, re-encodes and posts to Fog.
-func (g *Gateway) loop() {
+// Stop gracefully stops the gateway and closes resources.
+func (g *Gateway) Stop() {
+	slog.Info("[Gateway] Stopping", "gateway", g.Address)
+
+	if g.lora != nil {
+		if err := g.lora.Close(); err != nil {
+			slog.Warn(
+				"[Gateway] Failed to close LoRa device",
+				"gateway", g.Address, "error", err,
+			)
+		}
+	}
+
+	if g.cancel != nil {
+		g.cancel()
+	}
+
+	g.wg.Wait()
+	slog.Info("[Gateway] Stopped", "address", g.Address)
+}
+
+// startHTTPServer khởi động server HTTP nội bộ để nhận lệnh từ Fog Server
+func (g *Gateway) startHTTPServer(ctx context.Context) {
 	defer g.wg.Done()
+	mux := http.NewServeMux()
+
+	// Endpoint nhận danh sách Slot Map mới từ Server
+	mux.HandleFunc("/update_beacon", g.handleBeaconUpdate)
+	mux.HandleFunc("/control", g.handleControl)
+
+	server := &http.Server{Addr: g.Address, Handler: mux}
+
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error(
+				"[Gateway] HTTP server error",
+				"gateway", g.Address, "error", err,
+			)
+		}
+	}()
+
+	<-ctx.Done()
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), HTTPTimeout)
+	defer cancel()
+	if err := server.Shutdown(ctxShutdown); err != nil {
+		slog.Error(
+			"[Gateway] HTTP server shutdown failed",
+			"gateway", g.Address, "error", err,
+		)
+	} else {
+		slog.Info(
+			"[Gateway] HTTP server shutdown clean",
+			"gateway", g.Address,
+		)
+	}
+}
+
+// handleBeaconUpdate: Nhận Slot Map mới từ Server (khi có đăng ký/hết hạn session)
+func (g *Gateway) handleBeaconUpdate(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}()
+	var newMap map[string]int
+	if err := json.NewDecoder(r.Body).Decode(&newMap); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	g.slotMutex.Lock()
+	g.currentSlots = newMap
+	g.slotMutex.Unlock()
+	slog.Info(
+		"[Gateway] Updated beacon slots",
+		"gateway", g.Address, "count", len(newMap),
+	)
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}()
+
+	var controlJSON model.ControlData
+	if err := json.NewDecoder(r.Body).Decode(&controlJSON); err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	// Đưa vào queue để gửi ở CONTROL frame
+	select {
+	case g.controlQueue <- controlJSON:
+		slog.Info(
+			"[Gateway] Queued CONTROL",
+			"gateway", g.Address, "vehicle", controlJSON.VehicleID,
+		)
+	default:
+		slog.Warn("[Gateway] Control queue FULL, dropping control!")
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// loraLoop: TDMA
+func (g *Gateway) loraLoop(ctx context.Context) {
+	defer g.wg.Done()
+
+	// Dùng một biến theo dõi thời điểm bắt đầu dự kiến của chu kỳ tiếp theo
+	nextCycleStart := time.Now()
+
 	for {
 		select {
-		case <-g.stop:
-			log.Printf("[gateway %s] stopping uplink loop", g.ID)
+		case <-ctx.Done():
 			return
 		default:
 		}
 
-		line, err := g.Device.ReadLine(0)
-		if err != nil {
-			// transient error: wait and continue
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Decode input using InParser
-		vd, err := g.InParser.DecodeTelemetry(line)
-		if err != nil {
-			log.Printf("[gateway %s] decode %s error: %v", g.ID, g.WireIn, err)
-			continue
+		if time.Until(nextCycleStart) > 0 {
+			slog.Debug("[Gateway] Sleep to next Cycle", "gateway", g.Address)
+			g.sleepUntil(ctx, nextCycleStart)
 		} else {
-			log.Printf("[gateway %s] decode %s: %s", g.ID, g.WireIn, line)
+			slog.Debug("[Gateway] Resync Cycle", "gateway", g.Address)
+			nextCycleStart = time.Now()
 		}
 
-		// check validation of packet that belong to vehicle managed by gateway
-		if _, ok := g.VehicleSet[vd.VehicleID]; !ok {
-			log.Printf("[gateway %s] skip telemetry from unmanaged vehicle %s", g.ID, vd.VehicleID)
-			continue
-		}
+		// Snapshot số slot hiện tại
+		g.slotMutex.Lock()
+		slots := make(map[string]int)
+		maps.Copy(slots, g.currentSlots)
+		slotCount := len(slots)
+		g.slotMutex.Unlock()
 
-		// Encode for Fog using OutParser
-		out, err := g.OutParser.EncodeTelemetry(vd)
-		if err != nil {
-			log.Printf("[gateway %s] encode %s err: %v", g.ID, g.WireOut, err)
-			continue
-		} else {
-			log.Printf("[gateway %s] encode %s: %s", g.ID, g.WireOut, out)
-		}
+		// cycleStart := time.Now()
+		cycleStart := nextCycleStart
+		cycleStartMs := cycleStart.UnixNano() / int64(time.Millisecond)
+		beaconEnd := cycleStart.Add(time.Duration(BeaconWindowMs) * time.Millisecond)
+		controlEnd := beaconEnd.Add(time.Duration(ControlWindowMs) * time.Millisecond)
+		registerEnd := controlEnd.Add(time.Duration(GuardTimeMs+RegisterWindowMs+GuardTimeMs) * time.Millisecond)
+		slotsEnd := registerEnd.Add(time.Duration(int64(slotCount)*(SlotWindowMs+GuardTimeMs)) * time.Millisecond)
 
-		// Determine content-type
-		contentType := "text/plain"
-		if g.WireOut == "json" {
-			contentType = "application/json"
-		}
+		// Cập nhật thời điểm bắt đầu chu kỳ KẾ TIẾP
+		nextCycleStart = slotsEnd
 
-		// send to Fog server
-		resp, err := http.Post(g.FogURL+"/api/telemetry", contentType, strings.NewReader(out))
-		if err != nil {
-			log.Printf("[gateway %s] forward err: %v", g.ID, err)
-			continue
-		} else {
-			log.Printf("[gateway %s] uplink %s → %s : %s", g.ID, g.WireIn, g.WireOut, out)
-		}
+		// === BEACON WINDOW ===
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Beacon",
+		)
+		g.sendBeacon(cycleStartMs, slots)
+		g.sleepUntil(ctx, beaconEnd)
 
-		// Properly close response body (lint-safe)
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			log.Printf("[gateway %s] warning: discard body: %v", g.ID, err)
-		}
-		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("[gateway %s] warning: close body: %v", g.ID, cerr)
-		}
+		// === CONTROL WINDOW ===
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Control",
+		)
+		g.processControl(ctx, controlEnd)
+
+		// === LORA LISTENING ===
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "Listen",
+		)
+		g.listenUntil(ctx, slotsEnd)
+		// === END CYCLE ===
+		slog.Debug(
+			"[Gateway] Cycle Status",
+			"gateway", g.Address, "status", "End",
+		)
 	}
 }
 
-// handleControl receives a control message from Fog (JSON or CSV),
-// decodes into ControlData, re-encodes into wire_in format, and
-// sends it downlink to the Vehicle via LoRa.
-func (g *Gateway) handleControl(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if cerr := r.Body.Close(); cerr != nil {
-			log.Printf("[gateway %s] warning: close control body: %v", g.ID, cerr)
-		}
-	}()
+func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
+	beacon := model.BeaconMessage{
+		Type:             model.PacketBeacon,
+		GatewayAddress:   g.Address,
+		GuardTimeMs:      GuardTimeMs,
+		CycleStartMs:     cycleStartMs,
+		BeaconWindowMs:   BeaconWindowMs,
+		ControlWindowMs:  ControlWindowMs,
+		RegisterWindowMs: RegisterWindowMs,
+		SlotWindowMs:     SlotWindowMs,
+		SlotMap:          slots,
+	}
 
-	body, err := io.ReadAll(r.Body)
+	payload, err := cbor.Marshal(beacon)
 	if err != nil {
-		http.Error(w, "failed to read request body", http.StatusBadRequest)
-		return
-	}
-	line := strings.TrimSpace(string(body))
-	if line == "" {
-		http.Error(w, "empty control message", http.StatusBadRequest)
-		return
-	}
-
-	// Step 1: decode incoming control message (Fog → Gateway)
-	var ctl model.ControlData
-	// Try JSON first
-	if err := json.Unmarshal(body, &ctl); err != nil {
-		// Try CSV fallback
-		csvp := parser.NewCSVParser()
-		ctl2, err2 := csvp.DecodeControl(line)
-		if err2 != nil {
-			http.Error(w, "invalid control message format", http.StatusBadRequest)
-			log.Printf("[gateway %s] invalid control: %v", g.ID, err2)
-			return
-		}
-		ctl = ctl2
-	}
-
-	// Step 2: encode message for downlink (Gateway → Vehicle)
-	var downlink string
-	switch strings.ToLower(g.WireIn) {
-	case "json":
-		b, err := json.Marshal(ctl)
-		if err != nil {
-			http.Error(w, "encode downlink error", http.StatusInternalServerError)
-			return
-		}
-		downlink = string(b)
-	default: // CSV
-		csvp := parser.NewCSVParser()
-		s, err := csvp.EncodeControl(ctl)
-		if err != nil {
-			http.Error(w, "encode downlink error", http.StatusInternalServerError)
-			return
-		}
-		downlink = s
-	}
-
-	// Step 3: send to Vehicle via LoRa
-	if err := g.Device.WriteLine(downlink); err != nil {
-		http.Error(w, "failed to send to vehicle", http.StatusInternalServerError)
-		log.Printf("[gateway %s] downlink send error: %v", g.ID, err)
+		slog.Error(
+			"[Gateway] Failed to marshal BEACON",
+			"gateway", g.Address, "error", err,
+		)
 		return
 	}
 
-	log.Printf("[gateway %s] downlink %s: %s", g.ID, g.WireIn, downlink)
-	w.WriteHeader(http.StatusAccepted)
+	if err := g.lora.WriteLine(payload); err != nil {
+		slog.Error("[Gateway] Failed to send BEACON",
+			"gateway", g.Address, "error", err)
+	} else {
+		slog.Info(
+			"[Gateway] Sent BEACON",
+			"gateway", g.Address, "slotCount", len(slots),
+		)
+	}
 }
 
-// Stop stops the gateway background loop and closes the device if present.
-func (g *Gateway) Stop() {
-	log.Printf("[gateway %s] stopping...", g.ID)
+// Hàm phụ trợ gửi gói Control (đã tách ra từ code cũ cho gọn)
+func (g *Gateway) sendControl(ctrl model.ControlData) {
+	payload, err := cbor.Marshal(ctrl)
+	if err != nil {
+		slog.Error(
+			"[Gateway] Control marshal error",
+			"gateway", g.Address, "error", err,
+		)
+		return
+	}
 
-	// Đóng stop channel an toàn
+	if err := g.lora.WriteLine(payload); err != nil {
+		slog.Error(
+			"[Gateway] Failed to send CONTROL",
+			"gateway", g.Address, "vehicle", ctrl.VehicleID, "error", err,
+		)
+	} else {
+		slog.Info(
+			"[Gateway] Sent CONTROL",
+			"gateway", g.Address, "vehicle", ctrl.VehicleID,
+		)
+	}
+}
+
+// Hàm phụ trợ giúp sleep chính xác và hỗ trợ cancel context
+func (g *Gateway) sleepUntil(ctx context.Context, deadline time.Time) {
+	d := time.Until(deadline)
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
-	case <-g.stop:
-	default:
-		close(g.stop)
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		return
+	}
+}
+
+// listenUntil: Lắng nghe LoRa liên tục cho đến thời điểm deadline
+func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
+	for {
+		// 1. Kiểm tra Context
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// 2. Kiểm tra Deadline
+		remaining := time.Until(deadline)
+		slog.Debug("[Listen]", "remain", remaining)
+		if remaining < ReadTimeout {
+			if remaining > 0 {
+				g.sleepUntil(ctx, deadline)
+			}
+			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
+		}
+
+		// 3. Đọc dữ liệu
+		frame, err := g.lora.ReadLine(ReadTimeout)
+		if err != nil {
+			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
+			if err == device.ErrTimeout { // Nhớ dùng biến lỗi chung device.ErrTimeout
+				slog.Debug("[Listen] End (timout)")
+				continue
+			}
+			// Lỗi khác (IO error)
+			slog.Error(
+				"[Gateway] Fail to read Lora",
+				"gateway", g.Address, "error", err,
+			)
+			time.Sleep(ReadTimeout / 4) // Nghỉ chút tránh spam log
+			continue
+		}
+
+		if len(frame) == 0 {
+			slog.Debug("[Listen] End (lenght 0)")
+			continue
+		}
+
+		// 4. Xử lý gói tin (Spawn Goroutine để không chặn luồng lắng nghe)
+		payload := make([]byte, len(frame))
+		copy(payload, frame)
+		g.wg.Add(1)
+		go func(data []byte) {
+			defer g.wg.Done()
+			g.processLora(data)
+		}(payload)
+		slog.Debug("[Listen] End")
+	}
+}
+
+// processLora: Xử lý logic gói tin
+func (g *Gateway) processLora(frame []byte) {
+	var generic map[string]any
+	if err := cbor.Unmarshal(frame, &generic); err != nil {
+		slog.Warn(
+			"[Gateway] Corrupted packet",
+			"gateway", g.Address, "error", err,
+		)
+		return
 	}
 
-	// Stop HTTP server
-	if g.server != nil {
-		log.Printf("[gateway %s] Shutting down web server...", g.ID)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := g.server.Shutdown(ctx); err != nil {
-			log.Printf("[gateway %s] HTTP server shutdown error: %v", g.ID, err)
-		} else {
-			log.Printf("[gateway %s] Web server stopped cleanly", g.ID)
+	msgType, ok := generic["type"].(string)
+	if !ok {
+		return
+	}
+
+	// Lọc gói tin theo Window (TDMA Enforcement)
+	switch msgType {
+	case model.PacketHello:
+		var hello model.HelloMessage
+		if err := cbor.Unmarshal(frame, &hello); err == nil {
+			slog.Info(
+				"[Gateway] Received HELLO",
+				"gateway", g.Address, "vehicle", hello.VehicleID,
+			)
+			g.postRegisterToServer(hello.VehicleID)
+		}
+	case model.PacketTelemetry:
+		var telemetry model.VehicleData
+		if err := cbor.Unmarshal(frame, &telemetry); err == nil {
+			g.slotMutex.Lock()
+			_, exists := g.currentSlots[telemetry.VehicleID]
+			g.slotMutex.Unlock()
+
+			if exists {
+				slog.Info(
+					"[Gateway] Received TELEMETRY",
+					"gateway", g.Address, "vehicle", telemetry.VehicleID,
+				)
+				g.postTelemetryToServer(telemetry)
+			} else {
+				slog.Warn(
+					"[Gateway] Ignored TELEMETRY (No Slot)",
+					"gateway", g.Address, "vehicle", telemetry.VehicleID,
+				)
+			}
 		}
 	}
+}
 
-	// Close device
-	if g.Device != nil {
-		if err := g.Device.Close(); err != nil {
-			log.Printf("[gateway %s] device close err: %v", g.ID, err)
+// processControl: Gửi các lệnh trong hàng đợi cho đến khi hết giờ hoặc hết hàng đợi
+func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
+	// Tạo timer để báo hết giờ
+	// time.Until(deadline) trả về khoảng thời gian còn lại
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
+	for {
+		if time.Until(deadline) < ReadTimeout {
+			slog.Debug("[Gateway] Control window closing (time budget)")
+			// g.sleepUntil(ctx, deadline)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case ctrl := <-g.controlQueue:
+			g.sendControl(ctrl)
+			time.Sleep(ReadTimeout / 4)
+		case <-timer.C:
+			// Khi timer nổ (đúng thời điểm deadline), thoát vòng lặp
+			// Thay thế cho việc dùng sleepUntil
+			return
 		}
 	}
+}
 
-	// Wait goroutine done
-	done := make(chan struct{})
-	go func() {
-		g.wg.Wait()
-		close(done)
+// Helper function để tái sử dụng code gửi request
+func (g *Gateway) sendJSONRequest(ctx context.Context, method, url string, payload any) (*http.Response, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal error: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("create request error: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Thực hiện request
+	return g.httpClient.Do(req)
+}
+
+// postRegisterToServer: Gửi yêu cầu đăng ký lên Server
+func (g *Gateway) postRegisterToServer(vehicleID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), ContextTimeout)
+	defer cancel()
+
+	register := model.RegisterRequest{
+		GatewayAddress: g.Address,
+		VehicleID:      vehicleID,
+	}
+
+	slog.Info(
+		"[Gateway] Sending REGISTER",
+		"gateway", g.Address, "vehicle", vehicleID,
+	)
+	url := fmt.Sprintf("http://%s/register", g.ServerAddress)
+	resp, err := g.sendJSONRequest(ctx, "POST", url, register)
+	if err != nil {
+		slog.Error(
+			"[Gateway] Failed to POST register to Server",
+			"gateway", g.Address, "server", g.ServerAddress, "error", err,
+		)
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 	}()
 
-	select {
-	case <-done:
-		log.Printf("[gateway %s] stopped cleanly", g.ID)
-	case <-time.After(3 * time.Second):
-		log.Printf("[gateway %s] stop timeout (forcing exit)", g.ID)
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn(
+			"[Gateway] Server rejected registration",
+			"gateway", g.Address, "status", resp.Status,
+		)
+		return
+	}
+
+	// Optional: parse response (slot/gateway)
+	var registerResponse model.RegisterResponse
+	if err := json.NewDecoder(resp.Body).Decode(&registerResponse); err != nil && err != http.ErrBodyReadAfterClose {
+		// decode error is non-fatal but log
+		slog.Debug(
+			"[Gateway] Failed to parse register response",
+			"gateway", g.Address, "error", err,
+		)
+	} else {
+		slog.Info(
+			"[Gateway] Register accepted by server",
+			"gateway", registerResponse.GatewayAddress,
+			"vehicle", vehicleID, "slot", registerResponse.Slot,
+		)
+	}
+}
+
+// postTelemetryToServer: Gửi dữ liệu Telemetry lên Server
+func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
+	ctx, cancel := context.WithTimeout(context.Background(), ContextTimeout)
+	defer cancel()
+
+	slog.Info(
+		"[Gateway] Sending TELEMETRY",
+		"gateway", g.Address, "vehicle", data.VehicleID,
+		"lat", data.Latitude, "lon", data.Longitude,
+	)
+	url := fmt.Sprintf("http://%s/telemetry", g.ServerAddress)
+	resp, err := g.sendJSONRequest(ctx, "POST", url, data)
+	if err != nil {
+		slog.Error(
+			"[Gateway] Failed to POST telemetry to Server",
+			"gateway", g.Address, "server", g.ServerAddress, "error", err,
+		)
+		return
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn(
+			"[Gateway] Server rejected telemetry",
+			"gateway", g.Address, "status", resp.Status,
+		)
+		return
 	}
 }

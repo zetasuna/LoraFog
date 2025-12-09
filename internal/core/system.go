@@ -1,230 +1,168 @@
-// Package core contains the main runtime logic and orchestration layer for the LoraFog system.
-// It defines the FogServer, Gateway, Vehicle, and System types that manage their lifecycle.
+// Package core orchestrates system startup and shutdown.
 package core
 
 import (
-	"log"
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
+	"LoraFog/internal/database"
 	"LoraFog/internal/device"
 	"LoraFog/internal/model"
-	"LoraFog/internal/parser"
 	"LoraFog/internal/util"
 
 	"gopkg.in/yaml.v3"
 )
 
-// System manages lifecycle of the main components (FogServer, Gateways, Vehicles).
-// It loads configuration from a YAML file and constructs objects accordingly.
+// System manages Fog server, gateways, and vehicles.
 type System struct {
-	cfgPath  string
-	cfg      *model.Config
-	parsers  map[string]parser.Parser
-	Fog      *FogServer
-	Gateways []*Gateway
-	Vehicles []*Vehicle
-	Arduinos []*device.ArduinoDevice
-	SocatMgr *util.SocatManager
+	configPath   string
+	config       *model.Config
+	server       *Server
+	gateways     []*Gateway
+	vehicles     []*Vehicle
+	arduinos     []*device.Arduino
+	serverDB     *database.ServerDB
+	socatManager *util.SocatManager
 
-	stop      chan struct{}
-	wg        sync.WaitGroup
-	started   bool
-	startLock sync.Mutex
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// NewSystem reads the YAML configuration at cfgPath and creates a System instance.
-// It also registers available parsers (csv/json) and constructs Gateway and Vehicle objects.
-func NewSystem(cfgPath string) (*System, error) {
-	b, err := os.ReadFile(cfgPath)
+// NewSystem constructs a System from YAML configuration.
+func NewSystem(path string) (*System, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var cfg model.Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
 
-	s := &System{
-		cfgPath: cfgPath,
-		cfg:     &cfg,
-		parsers: make(map[string]parser.Parser),
+	sys := &System{
+		configPath:   path,
+		config:       &cfg,
+		socatManager: util.NewSocatManager(),
 	}
 
-	// Virtual Serial Setup
-	virtMgr := util.NewSocatManager()
-	s.SocatMgr = virtMgr
-	for _, pair := range cfg.VirtualSerials.Pairs {
-		if err := virtMgr.CreatePair(pair.Left, pair.Right); err != nil {
-			log.Printf("[virt-serial] failed to create pair: %v", err)
+	for _, vs := range cfg.VirtualSerials {
+		if err := sys.socatManager.CreatePair(
+			vs.Left,
+			vs.Right,
+		); err != nil {
+			slog.Error("[System] Failed to create socat pair", "left", vs.Left, "right", vs.Right, "error", err)
 		}
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(300 * time.Millisecond)
 
-	// register parser formats
-	s.parsers["csv"] = parser.NewCSVParser()
-	s.parsers["json"] = parser.NewJSONParser()
-
-	// construct FogServer from config
-	if cfg.Server.FogAddr != "" {
-		// s.Fog = NewFogServer(cfg.Server.FogAddr)
-		s.Fog = NewFogServer(cfg.Server.FogAddr, cfg.Server.AppAddr)
-		s.Fog.wireFmt = strings.ToLower(cfg.Global.WireFormat)
-
-		for _, gw := range cfg.Server.Gateways {
-			s.Fog.RegisterGateway(gw.ID, gw.URL, gw.Vehicles)
-			log.Printf("[config] Registered gateway %s (%s) vehicles=%v",
-				gw.ID, gw.URL, gw.Vehicles)
+	if cfg.Server.Address != "" {
+		// 1. Mở kết nối DB ở đây (trong main)
+		dsn := "admin:admin@tcp(localhost:3306)/boat_db"
+		sys.serverDB, err = database.NewServerDB(dsn, 10, 5)
+		if err != nil {
+			slog.Error("[System] Database established fail", "error", err)
+		} else {
+			slog.Info("[System] Database established success")
 		}
-	} else {
-		log.Println("[config] Fog server disabled (no fog_addr configured)")
-	}
-
-	// construct gateways from config
-	for _, gcfg := range cfg.Gateways {
-		inFmt := gcfg.WireIn
-		if inFmt == "" {
-			inFmt = cfg.Global.WireFormat
-		}
-		outFmt := gcfg.WireOut
-		if outFmt == "" {
-			outFmt = cfg.Global.WireFormat
-		}
-		gw := NewGateway(
-			gcfg.ID,
-			gcfg.LoraDev,
-			gcfg.LoraBaud,
-			gcfg.URL,
-			gcfg.FogURL,
-			gcfg.WireIn,
-			gcfg.WireOut,
-			s.parsers[inFmt],
-			s.parsers[outFmt],
-			gcfg.Vehicles,
+		sys.server = NewServer(
+			cfg.Server.Address,
+			cfg.Server.AppAddress,
+			sys.serverDB,
 		)
-		s.Gateways = append(s.Gateways, gw)
 	}
-
-	// construct vehicles from config
-	for _, vcfg := range cfg.Vehicles {
-		wf := vcfg.WireFormat
-		if wf == "" {
-			wf = cfg.Global.WireFormat
-		}
-		p := s.parsers[wf]
-		veh := NewVehicle(
-			vcfg.ID,
-			vcfg.LoraDev,
-			vcfg.LoraBaud,
-			vcfg.ID,
-			vcfg.ArduinoDev,
-			vcfg.ArduinoBaud,
-			time.Duration(vcfg.TelemetryIntervalMs)*time.Millisecond,
-			p,
+	for _, g := range cfg.Gateways {
+		gateway, err := NewGateway(
+			g.Address,
+			g.ServerAddress,
+			g.LoraDevice,
+			g.LoraBaud,
 		)
-		s.Vehicles = append(s.Vehicles, veh)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init gateway %s: %w", g.Address, err)
+		}
+		sys.gateways = append(sys.gateways, gateway)
+	}
+	for _, v := range cfg.Vehicles {
+		vehicle, err := NewVehicle(
+			v.VehicleID,
+			v.LoraDevice,
+			v.LoraBaud,
+			v.ArduinoDevice,
+			v.ArduinoBaud,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to init vehicle %s: %w", v.VehicleID, err)
+		}
+		sys.vehicles = append(sys.vehicles, vehicle)
+	}
+	for _, a := range cfg.Arduinos {
+		sys.arduinos = append(sys.arduinos, device.NewArduino(a.Device, a.Baud))
 	}
 
-	// construct arduino devices from config
-	for _, arduinoCfg := range cfg.Arduinos {
-		arduino := device.NewArduinoDevice(arduinoCfg.ID, arduinoCfg.Dev, arduinoCfg.Baud)
-		s.Arduinos = append(s.Arduinos, arduino)
-	}
-	return s, nil
+	return sys, nil
 }
 
-// StartAll starts the FogServer, all Gateways and all Vehicles concurrently.
-// It registers gateways to the FogServer registry when a gateway is successfully started.
-func (s *System) StartAll() error {
-	s.startLock.Lock()
-	defer s.startLock.Unlock()
-	if s.started {
-		return nil
+// Start launches all system components.
+func (s *System) Start(ctx context.Context) error {
+	if s.server == nil && len(s.gateways) == 0 && len(s.vehicles) == 0 {
+		return fmt.Errorf("no active components")
 	}
-	s.started = true
-	s.stop = make(chan struct{})
+	ctx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
 
-	// start fog server
-	// go s.Fog.Start()
-	if s.Fog != nil {
-		log.Printf("[system] Starting fog server at %s ...", s.Fog.Addr)
-		go func() {
-			if err := s.Fog.Start(); err != nil {
-				log.Printf("[system] Fog server error: %v", err)
-			}
-		}()
-	} else {
-		log.Println("[system] Fog server is disabled; skipping startup")
-	}
-
-	// start gateways and register them to fog registry
-	for _, g := range s.Gateways {
-		if err := g.Start(); err != nil {
-			log.Printf("[gateway %s] start err: %v", g.ID, err)
-		} else {
-			log.Printf("[gateway %s] start: Success", g.ID)
-			// s.Fog.RegisterGateway(g.ID, g.FogURL, g.Vehicles)
-		}
-	}
-
-	// start vehicle agents
-	for _, v := range s.Vehicles {
-		if err := v.Start(); err != nil {
-			log.Printf("[vehicle %s] start err: %v", v.ID, err)
-		} else {
-			log.Printf("[vehicle %s] start: Success", v.ID)
-		}
-	}
-
-	// start arduino simulation
-	for _, arduino := range s.Arduinos {
+	if s.server != nil {
 		s.wg.Add(1)
-		go func(arduino *device.ArduinoDevice) {
+		go func() {
 			defer s.wg.Done()
-			log.Printf("[system] starting arduino %s device %s (baud %d)", arduino.ID, arduino.Device, arduino.Baud)
+			_ = s.server.Start(ctx)
+		}()
+	}
+	for _, gw := range s.gateways {
+		_ = gw.Start(ctx)
+	}
+	for _, vh := range s.vehicles {
+		_ = vh.Start(ctx)
+	}
+	for _, ino := range s.arduinos {
+		s.wg.Add(1)
+		go func(ino *device.Arduino) {
+			defer s.wg.Done()
 			stop := make(chan struct{})
 			go func() {
-				<-s.stop
+				<-ctx.Done()
 				close(stop)
 			}()
-
-			if err := arduino.StartSimulation(stop); err != nil {
-				log.Printf("[arduino %s] simulate failed: %v", arduino.ID, err)
-			} else {
-				log.Printf("[arduino %s] simulation stopped", arduino.ID)
-			}
-		}(arduino)
+			_ = ino.StartSimulation(stop)
+		}(ino)
 	}
 	return nil
 }
 
-// StopAll stops all running components gracefully.
-func (s *System) StopAll() {
-	s.startLock.Lock()
-	defer s.startLock.Unlock()
-	if !s.started {
-		return
+// Stop gracefully stops all components.
+func (s *System) Stop() {
+	slog.Info("[System] Stopping...")
+	if s.cancel != nil {
+		s.cancel()
 	}
-	for _, g := range s.Gateways {
-		g.Stop()
+	for _, gw := range s.gateways {
+		gw.Stop()
 	}
-	for _, v := range s.Vehicles {
-		v.Stop()
+	for _, vh := range s.vehicles {
+		vh.Stop()
 	}
-	for _, a := range s.Arduinos {
-		if err := a.Close(); err != nil {
-			log.Printf("[warning] failed to close arduino %s: %v", a.ID, err)
-		}
+	for _, ino := range s.arduinos {
+		_ = ino.Close()
 	}
-	if s.SocatMgr != nil {
-		s.SocatMgr.Cleanup()
+	if s.serverDB != nil {
+		_ = s.serverDB.Close()
 	}
-	s.Fog.Stop()
-	log.Println("[system] stopping all components...")
-	close(s.stop)
+	if s.socatManager != nil {
+		s.socatManager.Cleanup()
+	}
 	s.wg.Wait()
-	s.started = false
-	log.Println("[system] all components stopped.")
+	slog.Info("[System] Shutdown complete")
 }

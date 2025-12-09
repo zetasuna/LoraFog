@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	portName := flag.String("port", "/dev/serial0", "serial port (e.g. /dev/ttyUSB0)")
+	portName := flag.String("port", "/dev/lora1", "serial port (e.g. /dev/ttyUSB0)")
 	baud := flag.Int("baud", 9600, "baud rate")
 	id := flag.String("id", "module1", "id string to include in automatic message")
 	period := flag.Duration("period", 4*time.Second, "periodic send interval (0 = disable)")
@@ -149,4 +149,3 @@ func sendLine(port serial.Port, s string) error {
 	}
 	return nil
 }
-

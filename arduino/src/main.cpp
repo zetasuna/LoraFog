@@ -19,7 +19,8 @@
 #define DEFAULT_LATITUDE 0.0
 #define DEFAULT_LONGITUDE 0.0
 #define DEFAULT_HEADING 0
-#define UPDATE_INTERVAL 5000
+#define DEFAULT_PID 0.0
+#define UPDATE_INTERVAL 200
 #define DISTANCE_STOP 2.0 // 2m
 
 // === STRUCT ===
@@ -52,13 +53,19 @@ struct TelemetryData t_data;
 struct ControlData c_data;
 
 bool has_target = false;
+
+unsigned long last_update = 0;
+
+float pid_integral = 0;
+float pid_last_error = 0;
+unsigned long pid_last_time = 0;
+
 int16_t left_motor_speed = MIN_PPM;
 int16_t right_motor_speed = MIN_PPM;
 float latitude = DEFAULT_LATITUDE;
 float longitude = DEFAULT_LONGITUDE;
 int16_t current_heading = DEFAULT_HEADING;
 int16_t desired_heading = DEFAULT_HEADING;
-unsigned long last_update = 0;
 
 // === FUNCTION DECLARATIONS ===
 void autoControl();
@@ -71,9 +78,7 @@ void processControlMessage(const String &line);
 int16_t getHeading();
 int16_t calculateBearing(float current_latitude, float current_longitude,
                          float target_latitude, float target_longitude);
-int16_t calculateTurnAngle(int16_t current, int16_t desired);
-int16_t calculateLeftSpeed(int16_t error, int16_t turn_direction);
-int16_t calculateRightSpeed(int16_t error, int16_t turn_direction);
+float calculatePID(int16_t error);
 
 // === SETUP ===
 void setup() {
@@ -130,23 +135,31 @@ void loop() {
 
 // === CONTROL BOAT ===
 void autoControl() {
+  current_heading = getHeading();
+
   if (has_target &&
       isAtTarget(latitude, longitude, c_data.latitude, c_data.longitude)) {
     has_target = false;
     stopBoat();
     return;
   }
-  current_heading = getHeading();
-  int16_t turn_angle = calculateTurnAngle(current_heading, desired_heading);
-  int16_t turn_direction = (turn_angle > 180) ? -1 : 1;
+
+  if (c_data.cruise_speed <= 1000) {
+    stopBoat();
+    return;
+  }
+
+  int16_t turn_angle = (desired_heading - current_heading + 360) % 360;
   int16_t error = (turn_angle > 180) ? (turn_angle - 360) : turn_angle;
   error = constrain(error, -90, 90);
 
-  left_motor_speed = calculateLeftSpeed(error, turn_direction);
-  right_motor_speed = calculateRightSpeed(error, turn_direction);
+  float correction_f = calculatePID(error);
+  int16_t correction = (int16_t)roundf(correction_f);
 
-  left_motor_speed = constrain(left_motor_speed, MIN_PPM, MAX_PPM);
-  right_motor_speed = constrain(right_motor_speed, MIN_PPM, MAX_PPM);
+  left_motor_speed =
+      constrain((int)(c_data.cruise_speed + correction), MIN_PPM, MAX_PPM);
+  right_motor_speed =
+      constrain((int)(c_data.cruise_speed - correction), MIN_PPM, MAX_PPM);
 
   left_esc.writeMicroseconds(left_motor_speed);
   right_esc.writeMicroseconds(right_motor_speed);
@@ -157,6 +170,11 @@ void stopBoat() {
   right_motor_speed = MIN_PPM;
   left_esc.writeMicroseconds(left_motor_speed);
   right_esc.writeMicroseconds(right_motor_speed);
+
+  // reset PID to avoid windup/leftover integral when idle
+  pid_integral = 0.0;
+  pid_last_error = 0.0;
+  pid_last_time = millis();
 }
 
 // === CHECK ARRIVAL ===
@@ -221,15 +239,11 @@ void processControlMessage(const String &line) {
   c_data.kp = tokens[3].toFloat();
   c_data.ki = tokens[4].toFloat();
   c_data.kd = tokens[5].toFloat();
-  // Serial.print(c_data.kp, 6);
-  // Serial.print(",");
-  // Serial.print(c_data.ki, 6);
-  // Serial.print(",");
-  // Serial.print(c_data.kd, 6);
-  // Serial.print(",");
-  // Serial.print(c_data.cruise_speed);
-  // Serial.print(",");
-  // Serial.println(c_data.desired_heading);
+
+  // reset PID state when new control arrives
+  pid_integral = 0.0;
+  pid_last_error = 0.0;
+  pid_last_time = millis();
 }
 
 // === UTILS ===
@@ -253,20 +267,45 @@ int16_t calculateBearing(float current_latitude, float current_longitude,
   return int16_t(round(bearing));
 }
 
-int16_t calculateTurnAngle(int16_t current, int16_t desired) {
-  return (desired - current + 360) % 360;
-}
+// === PID CALCULATION ===
+float calculatePID(int16_t error) {
+  unsigned long now = millis();
+  float dt = (now - pid_last_time) / 1000.0f;
+  if (dt <= 0.0f)
+    dt = 0.01f;
 
-int16_t calculateLeftSpeed(int16_t error, int16_t turn_direction) {
-  int16_t left_speed =
-      c_data.cruise_speed + (c_data.kp * error * turn_direction);
-  left_speed = constrain(left_speed, MIN_PPM, MAX_PPM);
-  return left_speed;
-}
+  // P
+  float P = c_data.kp * (float)error;
 
-int16_t calculateRightSpeed(int16_t error, int16_t turn_direction) {
-  int16_t right_speed =
-      c_data.cruise_speed - (c_data.kp * error * turn_direction);
-  right_speed = constrain(right_speed, MIN_PPM, MAX_PPM);
-  return right_speed;
+  // I  (tích lũy)
+  pid_integral += (float)error * dt;
+  const float I_LIMIT = 200.0f;
+  if (pid_integral > I_LIMIT)
+    pid_integral = I_LIMIT;
+  else if (pid_integral < -I_LIMIT)
+    pid_integral = -I_LIMIT;
+  float I = c_data.ki * pid_integral;
+
+  // D (đạo hàm)
+  // derivative with simple LPF
+  static float prev_derivative = 0.0f;
+  float raw_deriv = (float)(error - pid_last_error) / dt;
+  float derivative = 0.85f * prev_derivative + 0.15f * raw_deriv;
+  prev_derivative = derivative;
+  float D = c_data.kd * derivative;
+
+  // Lưu trạng thái
+  pid_last_error = error;
+  pid_last_time = now;
+
+  float correction = P + I + D;
+
+  // clamp correction to safe PPM range
+  const float CORR_LIMIT = (MAX_PPM - MIN_PPM) / 2.0f;
+  if (correction > CORR_LIMIT)
+    correction = CORR_LIMIT;
+  if (correction < -CORR_LIMIT)
+    correction = -CORR_LIMIT;
+
+  return correction;
 }
