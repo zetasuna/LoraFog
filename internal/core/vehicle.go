@@ -193,7 +193,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 			return
 		default:
 		}
-		frame, err := v.lora.ReadLine(BeaconTimeout)
+		frame, err := v.lora.ReadBytes(BeaconTimeout)
 		if err != nil {
 			// Nếu timeout hoặc lỗi sau khi đã từng có session -> Reset về IDLE
 			if err == device.ErrTimeout {
@@ -389,7 +389,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			VehicleID: v.ID,
 		}
 		payload, _ := cbor.Marshal(hello)
-		if err := v.lora.WriteLine(payload); err != nil {
+		if err := v.lora.WriteBytes(payload); err != nil {
 			slog.Warn(
 				"[Vehicle] Failed to send HELLO during roaming",
 				"vehicle", v.ID, "state", v.state, "error", err,
@@ -428,7 +428,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			VehicleID: v.ID,
 		}
 		payload, _ := cbor.Marshal(msg)
-		if err := v.lora.WriteLine(payload); err != nil {
+		if err := v.lora.WriteBytes(payload); err != nil {
 			slog.Warn(
 				"[Vehicle] Failed to write HELLO",
 				"vehicle", v.ID, "state", v.state, "error", err,
@@ -476,7 +476,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 				VehicleID: v.ID,
 			}
 			payload, _ := cbor.Marshal(msg)
-			if err := v.lora.WriteLine(payload); err != nil {
+			if err := v.lora.WriteBytes(payload); err != nil {
 				slog.Warn(
 					"[Vehicle] Failed to write HELLO (retry)",
 					"vehicle", v.ID, "state", v.state, "error", err,
@@ -553,7 +553,7 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localC
 		RightSpeed:  data.RightSpeed,
 	}
 	payload, _ := cbor.Marshal(pkt)
-	if err := v.lora.WriteLine(payload); err != nil {
+	if err := v.lora.WriteBytes(payload); err != nil {
 		slog.Warn(
 			"[Vehicle] Failed to send TELEMETRY",
 			"vehicle", v.ID, "state", v.state, "error", err,

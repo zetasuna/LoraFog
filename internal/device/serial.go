@@ -4,6 +4,7 @@ package device
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 )
 
 var ErrTimeout = errors.New("[Serial] Read timeout")
+
+const (
+	Preamble       = 0xAA
+	PayloadTimeout = 200 * time.Millisecond
+)
 
 // Serial represents a simple serial port connection.
 type Serial struct {
@@ -37,14 +43,12 @@ func NewSerial(path string, baud int) (*Serial, error) {
 }
 
 // ReadLine reads a line of data with an optional timeout (in milliseconds).
-func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
+func (s *Serial) ReadLine(timeout time.Duration) (string, error) {
 	if s.Port == nil {
 		return "", errors.New("[Serial] Port not initialized")
 	}
 
-	const packetTimeout = 200 * time.Millisecond
-	waitTimeout := time.Duration(timeoutMs) * time.Millisecond
-	if err := s.Port.SetReadTimeout(waitTimeout); err != nil {
+	if err := s.Port.SetReadTimeout(timeout); err != nil {
 		slog.Warn("[Serial] Failed to set read timeout",
 			"device", s.Path, "error", err)
 	}
@@ -68,7 +72,7 @@ func (s *Serial) ReadLine(timeoutMs int64) (string, error) {
 		return "", nil // Gói tin rỗng chỉ có xuống dòng
 	}
 
-	_ = s.Port.SetReadTimeout(packetTimeout)
+	_ = s.Port.SetReadTimeout(PayloadTimeout)
 
 	for {
 		// Đọc 1 byte từ cổng Serial
@@ -114,6 +118,92 @@ func (s *Serial) WriteLine(data string) error {
 		slog.Warn("[Serial] Failed to write to serial",
 			"device", s.Path, "error", err)
 		return err
+	}
+	return nil
+}
+
+// ReadBytes reads a packet with format: [Preamble (1b)] [Length (1b)] [Payload (Length bytes)]
+// waitTimeout: Thời gian chờ tối đa để bắt được Preamble byte.
+func (s *Serial) ReadBytes(timeout time.Duration) ([]byte, error) {
+	if s.Port == nil {
+		return nil, errors.New("[Serial] Port not initialized")
+	}
+
+	// 1. Cấu hình timeout để chờ Preamble (Timeout dài)
+	if err := s.Port.SetReadTimeout(timeout); err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, 1)
+	startTime := time.Now()
+
+	// Vòng lặp tìm Preamble (để loại bỏ rác nếu có)
+	for {
+		n, err := s.Port.Read(buf)
+		if err != nil {
+			return nil, err // Timeout hoặc lỗi hardware
+		}
+		if n == 0 {
+			// Một số thư viện trả về 0 thay vì error khi timeout
+			if time.Since(startTime) > timeout {
+				return nil, ErrTimeout
+			}
+			continue
+		}
+
+		// Nếu tìm thấy Preamble byte
+		if buf[0] == Preamble {
+			break
+		}
+		// Nếu đọc được byte nhưng không phải Preamble -> Rác, bỏ qua và tiếp tục chờ
+	}
+
+	// 2. Đã bắt được Preamble -> Chuyển sang Timeout ngắn để đọc nốt gói tin
+	// (Tránh việc treo mãi nếu gói tin bị cụt)
+	if err := s.Port.SetReadTimeout(PayloadTimeout); err != nil {
+		return nil, err
+	}
+
+	// 3. Đọc byte độ dài (Length)
+	// Dùng io.ReadFull để đảm bảo đọc đủ 1 byte
+	if _, err := io.ReadFull(s.Port, buf); err != nil {
+		return nil, fmt.Errorf("read length byte failed: %w", err)
+	}
+	length := int(buf[0])
+
+	if length == 0 {
+		return []byte{}, nil // Gói tin rỗng
+	}
+
+	// 4. Đọc Payload dựa trên độ dài
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(s.Port, payload); err != nil {
+		return nil, fmt.Errorf("read payload failed (expect %d bytes): %w", length, err)
+	}
+
+	slog.Debug("[Serial] Read packet success", "len", length)
+	return payload, nil
+}
+
+// WriteBytes writes data with format: [Preamble] [Length] [Payload...]
+func (s *Serial) WriteBytes(data []byte) error {
+	if s.Port == nil {
+		return errors.New("[Serial] Port not initialized")
+	}
+
+	length := len(data)
+	if length > 255 {
+		return fmt.Errorf("payload too large for 1-byte length prefix (max 255 bytes)")
+	}
+
+	// Tạo buffer: 1 byte Preamble + 1 byte Length + Data
+	packet := make([]byte, 2+length)
+	packet[0] = Preamble
+	packet[1] = byte(length)
+	copy(packet[2:], data)
+
+	if _, err := s.Port.Write(packet); err != nil {
+		return fmt.Errorf("write error: %w", err)
 	}
 	return nil
 }

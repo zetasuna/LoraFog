@@ -40,11 +40,8 @@ func (l *Lora) ReadLine(timeout time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("[Lora] Serial not initialized")
 	}
 
-	// Chuyển đổi duration sang ms
-	timeoutMs := int64(timeout / time.Millisecond)
-
 	// 1. Đọc 1 dòng text (đã được tách bởi \n ở tầng Serial)
-	line, err := l.serial.ReadLine(timeoutMs)
+	line, err := l.serial.ReadLine(timeout)
 	if err != nil {
 		// Nếu lỗi là timeout nhưng vẫn đọc được chút dữ liệu rác -> trả lỗi Timeout chuẩn
 		// Cần check xem thư viện serial trả lỗi gì, thường thì ta map về ErrTimeout
@@ -87,6 +84,33 @@ func (l *Lora) WriteLine(b []byte) error {
 
 	// 2. Gửi chuỗi text xuống Serial (Hàm WriteLine sẽ tự thêm \n)
 	return l.serial.WriteLine(b64Str)
+}
+
+// ReadBytes waits for a preamble byte within the timeout, then reads the length-prefixed payload.
+func (l *Lora) ReadBytes(timeout time.Duration) ([]byte, error) {
+	if l.serial == nil {
+		return nil, fmt.Errorf("[Lora] Serial not initialized")
+	}
+
+	// Gọi xuống Serial để xử lý logic: Preamble -> Length -> Payload
+	payload, err := l.serial.ReadBytes(timeout)
+	if err != nil {
+		// Map lại lỗi timeout để tầng trên dễ xử lý (ví dụ để retry)
+		// ErrTimeout được định nghĩa bên package device (serial.go)
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+// WriteBytes wraps the payload with Preamble and Length then writes to Serial.
+func (l *Lora) WriteBytes(data []byte) error {
+	if l.serial == nil {
+		return fmt.Errorf("[Lora] Serial not initialized")
+	}
+
+	// Gọi xuống Serial để đóng gói và gửi
+	return l.serial.WriteBytes(data)
 }
 
 // Close safely closes the LoRa serial device.

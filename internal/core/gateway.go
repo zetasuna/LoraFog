@@ -309,7 +309,7 @@ func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 		return
 	}
 
-	if err := g.lora.WriteLine(payload); err != nil {
+	if err := g.lora.WriteBytes(payload); err != nil {
 		slog.Error("[Gateway] Failed to send BEACON",
 			"gateway", g.Address, "error", err)
 	} else {
@@ -331,7 +331,7 @@ func (g *Gateway) sendControl(ctrl model.ControlData) {
 		return
 	}
 
-	if err := g.lora.WriteLine(payload); err != nil {
+	if err := g.lora.WriteBytes(payload); err != nil {
 		slog.Error(
 			"[Gateway] Failed to send CONTROL",
 			"gateway", g.Address, "vehicle", ctrl.VehicleID, "error", err,
@@ -381,7 +381,7 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 		}
 
 		// 3. Đọc dữ liệu
-		frame, err := g.lora.ReadLine(ReadTimeout)
+		frame, err := g.lora.ReadBytes(ReadTimeout)
 		if err != nil {
 			// Nếu timeout thì thử lại (vòng lặp tiếp theo)
 			if err == device.ErrTimeout { // Nhớ dùng biến lỗi chung device.ErrTimeout
