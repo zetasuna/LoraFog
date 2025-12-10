@@ -25,6 +25,9 @@ const (
 	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
 
 	BeaconTimeout = 30 * time.Second
+
+	HardwareOffset = 50
+	StatWindowSize = 10
 )
 
 // Vehicle là đại diện cho thiết bị thuyền/xe
@@ -46,6 +49,12 @@ type Vehicle struct {
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// Các biến dùng để đo độ trễ
+	statCount      int   // Đếm số gói đã nhận trong chu kỳ thống kê
+	statMinDelay   int64 // Độ trễ nhỏ nhất
+	statMaxDelay   int64 // Độ trễ lớn nhất
+	statTotalDelay int64 // Tổng độ trễ để tính trung bình}
 }
 
 // NewVehicle tạo một Vehicle mới
@@ -67,6 +76,8 @@ func NewVehicle(
 		state:        StateIdle,
 		assignedSlot: -1,
 		bestOffset:   math.MaxInt64,
+		statMinDelay: math.MaxInt64,
+		statMaxDelay: math.MinInt64,
 	}
 	if arduinoDev != "" {
 		vehicle.arduino = device.NewArduino(arduinoDev, arduinoBaud)
@@ -244,6 +255,33 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				"vehicle", v.ID, "state", v.state,
 				"source", beacon.GatewayAddress,
 			)
+
+			nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+			currentDelay := nowMs - beacon.Timestamp - HardwareOffset
+			v.statCount++
+			v.statTotalDelay += currentDelay
+			if currentDelay < v.statMinDelay {
+				v.statMinDelay = currentDelay
+			}
+			if currentDelay > v.statMaxDelay {
+				v.statMaxDelay = currentDelay
+			}
+			// Nếu đã đủ 10 gói tin (StatWindowSize)
+			if v.statCount >= StatWindowSize {
+				avgDelay := float64(v.statTotalDelay) / float64(v.statCount)
+				slog.Info(
+					"[Vehicle] Latency Stats (Last 10 Beacons)",
+					"vehicle", v.ID,
+					"min_delay_ms", v.statMinDelay,
+					"max_delay_ms", v.statMaxDelay,
+					"avg_delay_ms", fmt.Sprintf("%.2f", avgDelay),
+				)
+				// Reset lại bộ đếm cho chu kỳ tiếp theo
+				v.statCount = 0
+				v.statTotalDelay = 0
+				v.statMinDelay = math.MaxInt64
+				v.statMaxDelay = math.MinInt64
+			}
 
 			// record last beacon time and timestamp (ms)
 			lastBeaconTime = time.Now()

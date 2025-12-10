@@ -35,7 +35,14 @@ const (
 	ContextTimeout = 3 * time.Second
 
 	ControlQueue = 50
+
+	PacketLossWindowSize = 10
 )
+
+type VehicleStats struct {
+	SentCount int // Số gói mong đợi (số lần Gateway gửi Beacon và dành slot cho xe này)
+	RecvCount int // Số gói thực tế nhận được (Telemetry)
+}
 
 // Gateway là đại diện cho thiết bị Gateway LoRaWAN
 type Gateway struct {
@@ -51,6 +58,9 @@ type Gateway struct {
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	statsMutex sync.Mutex
+	stats      map[string]*VehicleStats
 }
 
 // NewGateway tạo một Gateway mới
@@ -228,6 +238,11 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 		slotCount := len(slots)
 		g.slotMutex.Unlock()
 
+		// --- [CHANGE START] ---
+		// Bắt đầu chu kỳ mới: Cập nhật biến "số gói gửi" (Expected) cho các xe có trong slot
+		g.updateExpectedStats(slots)
+		// --- [CHANGE END] ---
+
 		// cycleStart := time.Now()
 		cycleStart := nextCycleStart
 		cycleStartMs := cycleStart.UnixNano() / int64(time.Millisecond)
@@ -271,6 +286,7 @@ func (g *Gateway) loraLoop(ctx context.Context) {
 func (g *Gateway) sendBeacon(cycleStartMs int64, slots map[string]int) {
 	beacon := model.BeaconMessage{
 		Type:             model.PacketBeacon,
+		Timestamp:        time.Now().UnixNano() / int64(time.Millisecond),
 		GatewayAddress:   g.Address,
 		GuardTimeMs:      GuardTimeMs,
 		CycleStartMs:     cycleStartMs,
@@ -434,6 +450,18 @@ func (g *Gateway) processLora(frame []byte) {
 					"[Gateway] Received TELEMETRY",
 					"gateway", g.Address, "vehicle", telemetry.VehicleID,
 				)
+
+				// --- [CHANGE START] ---
+				// Gói tin hợp lệ từ xe đã được cấp slot -> Tăng biến đếm thành công
+				g.statsMutex.Lock()
+				if stat, ok := g.stats[telemetry.VehicleID]; ok {
+					stat.RecvCount++
+				}
+				g.statsMutex.Unlock()
+				// Kiểm tra xem đã đủ 10 chu kỳ để in log chưa
+				g.checkAndLogStats(telemetry.VehicleID)
+				// --- [CHANGE END] ---
+
 				g.postTelemetryToServer(telemetry)
 			} else {
 				slog.Warn(
@@ -578,5 +606,46 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 			"gateway", g.Address, "status", resp.Status,
 		)
 		return
+	}
+}
+
+// updateExpectedStats: Tăng biến đếm Expected cho mỗi xe được cấp slot trong chu kỳ này
+func (g *Gateway) updateExpectedStats(slots map[string]int) {
+	g.statsMutex.Lock()
+	defer g.statsMutex.Unlock()
+
+	for vehicleID := range slots {
+		if _, ok := g.stats[vehicleID]; !ok {
+			g.stats[vehicleID] = &VehicleStats{}
+		}
+		g.stats[vehicleID].SentCount++ // Tăng số gói kỳ vọng (Sent count)
+	}
+}
+
+// checkAndLogStats: In thông tin packet loss nếu đủ chu kỳ 10 gói
+func (g *Gateway) checkAndLogStats(vehicleID string) {
+	g.statsMutex.Lock()
+	defer g.statsMutex.Unlock()
+
+	stat, ok := g.stats[vehicleID]
+	if !ok {
+		return
+	}
+
+	// Nếu số gói kỳ vọng đạt ngưỡng (10 gói)
+	if stat.SentCount >= PacketLossWindowSize {
+		ratio := (float64(stat.RecvCount) / float64(stat.SentCount)) * 100.0
+
+		slog.Info(
+			"[Gateway] Packet Loss Stats (Window: 10)",
+			"vehicle", vehicleID,
+			"expected_sent", stat.SentCount,
+			"actual_received", stat.RecvCount,
+			"success_ratio_percent", fmt.Sprintf("%.2f%%", ratio),
+		)
+
+		// Reset sau khi in
+		stat.SentCount = 0
+		stat.RecvCount = 0
 	}
 }
