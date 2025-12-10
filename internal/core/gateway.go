@@ -82,6 +82,9 @@ func NewGateway(
 		httpClient:    &http.Client{Timeout: HTTPTimeout},
 		currentSlots:  make(map[string]int),
 		controlQueue:  make(chan model.ControlData, ControlQueue),
+		// --- [CHANGE START] ---
+		stats: make(map[string]*VehicleStats),
+		// --- [CHANGE END] ---
 	}
 	return gateway, nil
 }

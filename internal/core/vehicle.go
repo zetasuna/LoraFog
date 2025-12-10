@@ -24,7 +24,7 @@ const (
 	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
 	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
 
-	BeaconTimeout = 30 * time.Second
+	BeaconTimeout = 300 * time.Second
 
 	HardwareOffset = 50
 	StatWindowSize = 10

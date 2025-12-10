@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	TimeToLive     = 60 * time.Second
+	TimeToLive     = 300 * time.Second
 	SweeperCycle   = 10 * time.Second
 	MaxGatewaySlot = 10
 )
