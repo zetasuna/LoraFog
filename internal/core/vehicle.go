@@ -20,13 +20,15 @@ import (
 type VehicleState int
 
 const (
+	TDMA = true
+
 	StateIdle    VehicleState = 0 // Chờ Beacon, chưa có slot
 	StateJoining VehicleState = 1 // Đã gửi Hello, chờ Beacon tiếp theo để confirm slot
 	StateSending VehicleState = 2 // Đã có slot, gửi Telemetry định kỳ
 
 	BeaconTimeout = 300 * time.Second
 
-	HardwareOffset = 50
+	HardwareOffset = 0
 	StatWindowSize = 10
 )
 
@@ -216,7 +218,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				"[Vehicle] Failed to read Lora",
 				"vehicle", v.ID, "state", v.state, "error", err,
 			)
-			// time.Sleep(100 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -339,7 +341,7 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 	v.mutexOffset.Lock()
 	if isRoaming {
 		slog.Info(
-			"[Vehicle] Roaming detected - Resetting Sync",
+			"[Vehicle] Roaming detected => Resetting Sync",
 			"old", v.currentGateway, "new", b.GatewayAddress,
 		)
 		// Reset về trạng thái chưa đồng bộ để bắt đầu tính lại từ đầu với Gateway mới
@@ -379,7 +381,11 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 				"[Vehicle] Already assigned slot while waiting",
 				"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
 			)
-			go v.performTDMA(ctx, b, localCycleStart)
+			if TDMA {
+				go v.performTDMA(ctx, b, localCycleStart)
+			} else {
+				go v.performNonTDMA()
+			}
 			return
 		}
 
@@ -418,7 +424,11 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 				"[Vehicle] Already assigned slot while waiting",
 				"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
 			)
-			go v.performTDMA(ctx, b, localCycleStart)
+			if TDMA {
+				go v.performTDMA(ctx, b, localCycleStart)
+			} else {
+				go v.performNonTDMA()
+			}
 			return
 		}
 
@@ -450,7 +460,11 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 				"[Vehicle] Joined successfully",
 				"vehicle", v.ID, "state", v.state, "slot", slot,
 			)
-			go v.performTDMA(ctx, b, localCycleStart)
+			if TDMA {
+				go v.performTDMA(ctx, b, localCycleStart)
+			} else {
+				go v.performNonTDMA()
+			}
 		} else {
 			// Chưa thấy tên mình, gói Hello có thể bị mất. Gửi lại Hello ở cuối chu kỳ này
 			slog.Warn(
@@ -463,11 +477,15 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			if v.assignedSlot != -1 {
 				v.state = StateSending
 				slog.Info(
-					"[Vehicle] Slot assigned during wait => Skip resend",
+					"[Vehicle] Slot assigned during wait => Skip send HELLO",
 					"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
 				)
 				// start TDMA for this cycle if possible
-				go v.performTDMA(ctx, b, localCycleStart)
+				if TDMA {
+					go v.performTDMA(ctx, b, localCycleStart)
+				} else {
+					go v.performNonTDMA()
+				}
 				return
 			}
 
@@ -494,7 +512,11 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 		// Trạng thái GỬI: Kiểm tra lại SlotMap xem còn được cấp phép không
 		if slot, ok := b.SlotMap[v.ID]; ok {
 			v.assignedSlot = slot // Cập nhật slot nếu Gateway thay đổi
-			go v.performTDMA(ctx, b, localCycleStart)
+			if TDMA {
+				go v.performTDMA(ctx, b, localCycleStart)
+			} else {
+				go v.performNonTDMA()
+			}
 		} else {
 			v.state = StateIdle
 			v.assignedSlot = -1
@@ -508,11 +530,15 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 			if v.assignedSlot != -1 {
 				v.state = StateSending
 				slog.Info(
-					"[Vehicle] Slot assigned during wait => Skip resend",
+					"[Vehicle] Slot assigned during wait => Skip send HELLO",
 					"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
 				)
 				// start TDMA for this cycle if possible
-				go v.performTDMA(ctx, b, localCycleStart)
+				if TDMA {
+					go v.performTDMA(ctx, b, localCycleStart)
+				} else {
+					go v.performNonTDMA()
+				}
 				return
 			}
 
@@ -527,12 +553,29 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 					"vehicle", v.ID, "state", v.state, "error", err,
 				)
 			} else {
+				v.state = StateJoining
 				slog.Info(
 					"[Vehicle] Sent HELLO (Lost slot)",
 					"vehicle", v.ID, "state", v.state,
 				)
 			}
 		}
+	}
+}
+
+// Hàm phụ trợ giúp sleep chính xác và hỗ trợ cancel context
+func (v *Vehicle) sleepUntil(ctx context.Context, target time.Time) {
+	d := time.Until(target)
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		return
 	}
 }
 
@@ -598,18 +641,37 @@ func (v *Vehicle) performTDMA(ctx context.Context, b model.BeaconMessage, localC
 	)
 }
 
-// Hàm phụ trợ giúp sleep chính xác và hỗ trợ cancel context
-func (v *Vehicle) sleepUntil(ctx context.Context, target time.Time) {
-	d := time.Until(target)
-	if d <= 0 {
-		return
+func (v *Vehicle) performNonTDMA() {
+	// Lấy dữ liệu mới nhất
+	v.mutexTelemetry.Lock()
+	data := v.lastTelemetry
+	v.mutexTelemetry.Unlock()
+
+	// Đóng gói
+	pkt := model.VehicleData{
+		Type:        model.PacketTelemetry,
+		VehicleID:   v.ID,
+		Latitude:    data.Latitude,
+		Longitude:   data.Longitude,
+		CurrentHead: data.CurrentHead,
+		TargetHead:  data.TargetHead,
+		LeftSpeed:   data.LeftSpeed,
+		RightSpeed:  data.RightSpeed,
 	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return
-	case <-timer.C:
-		return
+	for range 5 {
+		payload, _ := cbor.Marshal(pkt)
+		if err := v.lora.WriteBytes(payload); err != nil {
+			slog.Warn(
+				"[Vehicle] Failed to send TELEMETRY",
+				"vehicle", v.ID, "state", v.state, "error", err,
+			)
+			return
+		}
+		slog.Info(
+			"[Vehicle] Sent TELEMETRY (TDMA)",
+			"vehicle", v.ID,
+			"state", v.state, "slot", v.assignedSlot,
+			"lat", data.Latitude, "lon", data.Longitude,
+		)
 	}
 }

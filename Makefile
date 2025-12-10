@@ -9,6 +9,7 @@ MAIN := cmd/lora/main.go
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/$(APP_NAME)
 CONFIG := configs/config.yml
+TEST_CONFIG := configs/config_test.yml
 DEMO_CONFIG := configs/config_demo.yml
 VEHICLE_CONFIG := configs/config_vehicle.yml
 GATEWAY_CONFIG := configs/config_gateway.yml
@@ -39,6 +40,11 @@ build:
 run:
 	@echo "🚀 Running LoraFog with config: $(CONFIG)..."
 	@$(GO) run $(MAIN) -c $(CONFIG)
+
+.PHONY: test
+test:
+	@echo "🚀 Running LoraFog with config: $(TEST_CONFIG)..."
+	@$(GO) run $(MAIN) -c $(TEST_CONFIG)
 
 .PHONY: demo
 demo:
@@ -98,8 +104,8 @@ clean:
 # 🧪 Testing
 # =====================
 
-.PHONY: test
-test:
+.PHONY: testing
+testing:
 	@echo "🧪 Running unit tests..."
 	@$(GO) test -v ./...
 

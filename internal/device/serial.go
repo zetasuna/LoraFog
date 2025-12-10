@@ -2,6 +2,7 @@
 package device
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ var ErrTimeout = errors.New("[Serial] Read timeout")
 
 const (
 	Preamble       = 0xAA
+	LengthByte     = 2
 	PayloadTimeout = 200 * time.Millisecond
 )
 
@@ -141,6 +143,8 @@ func (s *Serial) ReadBytes(timeout time.Duration) ([]byte, error) {
 	for {
 		n, err := s.Port.Read(buf)
 		if err != nil {
+			slog.Error("[Serial] READ ERROR while waiting preamble",
+				"device", s.Path, "error", err)
 			return nil, err // Timeout hoặc lỗi hardware
 		}
 		if n == 0 {
@@ -166,41 +170,54 @@ func (s *Serial) ReadBytes(timeout time.Duration) ([]byte, error) {
 
 	// 3. Đọc byte độ dài (Length)
 	// Dùng io.ReadFull để đảm bảo đọc đủ 1 byte
-	if _, err := io.ReadFull(s.Port, buf); err != nil {
-		return nil, fmt.Errorf("read length byte failed: %w", err)
+	// if _, err := io.ReadFull(s.Port, buf); err != nil {
+	// 	return nil, fmt.Errorf("read length byte failed: %w", err)
+	// }
+	// length := int(buf[0])
+	// 	if length == 0 {
+	// 	return []byte{}, nil // Gói tin rỗng
+	// }
+	lenBuf := make([]byte, LengthByte)
+	if _, err := io.ReadFull(s.Port, lenBuf); err != nil {
+		slog.Error("[Serial] READ ERROR length bytes",
+			"device", s.Path, "error", err)
+		return nil, err
 	}
-	length := int(buf[0])
-
-	if length == 0 {
-		return []byte{}, nil // Gói tin rỗng
+	length := int(binary.BigEndian.Uint16(lenBuf))
+	if length < 0 || length > 65535 {
+		return nil, fmt.Errorf("invalid payload length: %d", length)
 	}
 
 	// 4. Đọc Payload dựa trên độ dài
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(s.Port, payload); err != nil {
-		return nil, fmt.Errorf("read payload failed (expect %d bytes): %w", length, err)
+		slog.Error("[Serial] READ ERROR payload corrupted",
+			"device", s.Path,
+			"expected", length,
+			"error", err)
+		return nil, err
 	}
 
-	slog.Info("[Serial] Read packet success", "length", length)
+	slog.Debug("[Serial] Read packet success", "length", length)
 	return payload, nil
 }
 
-// WriteBytes writes data with format: [Preamble] [Length] [Payload...]
+// WriteBytes writes data
 func (s *Serial) WriteBytes(data []byte) error {
 	if s.Port == nil {
 		return errors.New("[Serial] Port not initialized")
 	}
 
 	length := len(data)
-	if length > 255 {
-		return fmt.Errorf("payload too large for 1-byte length prefix (max 255 bytes)")
+	if length > 65535 {
+		return fmt.Errorf("payload too large for 1-byte length prefix (max 65535 bytes)")
 	}
 
-	// Tạo buffer: 1 byte Preamble + 1 byte Length + Data
-	packet := make([]byte, 2+length)
+	// Tạo buffer: 1 byte Preamble + n byte Length + Data
+	packet := make([]byte, 1+LengthByte+length)
 	packet[0] = Preamble
-	packet[1] = byte(length)
-	copy(packet[2:], data)
+	binary.BigEndian.PutUint16(packet[1:], uint16(length))
+	copy(packet[1+LengthByte:], data)
 
 	if _, err := s.Port.Write(packet); err != nil {
 		return fmt.Errorf("write error: %w", err)

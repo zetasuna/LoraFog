@@ -1,6 +1,4 @@
-// Package core defines the Gateway component responsible for
-// bridging LoRa-connected vehicles with the FogServer
-// using CBOR (for LoRa) and JSON (for HTTP).
+// Package core defines the Gateway component
 package core
 
 import (
@@ -23,14 +21,21 @@ import (
 
 const (
 	// Thông số TDMA cố định
-	LoraDuration     = int64(2000)
-	GuardTimeMs      = LoraDuration
-	SlotWindowMs     = LoraDuration
-	BeaconWindowMs   = LoraDuration
-	ControlWindowMs  = LoraDuration * 2
-	RegisterWindowMs = LoraDuration * 2
+	// LoraDuration     = int64(2000)
+	// GuardTimeMs      = LoraDuration
+	// SlotWindowMs     = LoraDuration
+	// BeaconWindowMs   = LoraDuration
+	// ControlWindowMs  = LoraDuration * 2
+	// RegisterWindowMs = LoraDuration * 2
+	// ReadTimeout      = 100 * time.Millisecond
+	LoraDuration     = int64(100)
+	GuardTimeMs      = LoraDuration / 2
+	SlotWindowMs     = LoraDuration * 1
+	BeaconWindowMs   = LoraDuration * 1
+	ControlWindowMs  = LoraDuration * 1
+	RegisterWindowMs = LoraDuration * 5
+	ReadTimeout      = 50 * time.Millisecond
 
-	ReadTimeout    = 100 * time.Millisecond
 	HTTPTimeout    = 5 * time.Second
 	ContextTimeout = 3 * time.Second
 
@@ -377,7 +382,7 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 			if remaining > 0 {
 				g.sleepUntil(ctx, deadline)
 			}
-			return // Hết cửa sổ -> Thlength := int(header[0])oát ngay để chuyển sang trạng thái khác
+			return // Hết cửa sổ -> Thoát ngay để chuyển sang trạng thái khác
 		}
 
 		// 3. Đọc dữ liệu
@@ -393,8 +398,9 @@ func (g *Gateway) listenUntil(ctx context.Context, deadline time.Time) {
 				"[Gateway] Fail to read Lora",
 				"gateway", g.Address, "error", err,
 			)
-			time.Sleep(ReadTimeout / 4) // Nghỉ chút tránh spam log
-			continue
+			// time.Sleep(ReadTimeout / 5) // Nghỉ chút tránh spam log
+			// continue
+			return
 		}
 
 		if len(frame) == 0 {
@@ -495,7 +501,7 @@ func (g *Gateway) processControl(ctx context.Context, deadline time.Time) {
 			return
 		case ctrl := <-g.controlQueue:
 			g.sendControl(ctrl)
-			time.Sleep(ReadTimeout / 4)
+			time.Sleep(ReadTimeout / 5)
 		case <-timer.C:
 			// Khi timer nổ (đúng thời điểm deadline), thoát vòng lặp
 			// Thay thế cho việc dùng sleepUntil
@@ -616,6 +622,10 @@ func (g *Gateway) postTelemetryToServer(data model.VehicleData) {
 func (g *Gateway) updateExpectedStats(slots map[string]int) {
 	g.statsMutex.Lock()
 	defer g.statsMutex.Unlock()
+
+	if g.stats == nil {
+		g.stats = make(map[string]*VehicleStats)
+	}
 
 	for vehicleID := range slots {
 		if _, ok := g.stats[vehicleID]; !ok {

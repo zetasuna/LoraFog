@@ -6,7 +6,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"log"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +23,10 @@ import (
 )
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	// --- Parse CLI flags ---
 	cfgPath := flag.String("c", "configs/config.yml", "Path to YAML configuration file")
 	flag.Parse()

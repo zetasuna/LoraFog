@@ -1,0 +1,5 @@
+server:
+  address: "127.0.0.1:10000"
+  # app_address: "127.0.0.1:3001"
+  virtual_gateways: 1
+  vehicles_per_gateway: 10

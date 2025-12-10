@@ -69,6 +69,53 @@ func (m *SocatManager) CreatePair(left, right string) error {
 	}
 }
 
+// CreateBus tạo một BUS broadcast giả lập LoRa
+func (m *SocatManager) CreateBus(busPath string) error {
+	cmd := exec.Command("socat", "-d", "-d",
+		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", busPath),
+		"PIPE",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start bus socat: %w", err)
+	}
+
+	slog.Info("[Socat] Bus started", "bus", busPath, "pid", cmd.Process.Pid)
+	m.cmds = append(m.cmds, cmd)
+	m.links = append(m.links, busPath)
+	return nil
+}
+
+func (m *SocatManager) CreateHub(path string) (*LoRaHub, error) {
+	hub := NewLoRaHub(path)
+	if err := hub.Start(); err != nil {
+		return nil, err
+	}
+	return hub, nil
+}
+
+// CreateConnector tạo một PTY ảo nối vào 1 BUS broadcast
+func (m *SocatManager) CreateConnector(ptyPath, busPath string) error {
+	cmd := exec.Command("socat",
+		"-d", "-d",
+		fmt.Sprintf("pty,raw,echo=0,link=%s", ptyPath),
+		fmt.Sprintf("UNIX-CONNECT:%s", busPath),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("connector failed: %w", err)
+	}
+
+	slog.Info("[Socat] Connector created", "pty", ptyPath, "bus", busPath)
+	m.cmds = append(m.cmds, cmd)
+	m.links = append(m.links, ptyPath)
+	return nil
+}
+
 // Cleanup stops all started socat processes and removes links created.
 func (m *SocatManager) Cleanup() {
 	m.mu.Lock()

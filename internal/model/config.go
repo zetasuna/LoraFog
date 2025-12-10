@@ -17,8 +17,10 @@ type Config struct {
 
 // ServerConfig configures the fog server and app forwarder.
 type ServerConfig struct {
-	Address    string `yaml:"address" json:"address" cbor:"address"`
-	AppAddress string `yaml:"app_address" json:"app_address" cbor:"app_address"`
+	Address            string `yaml:"address" json:"address" cbor:"address"`
+	AppAddress         string `yaml:"app_address" json:"app_address" cbor:"app_address"`
+	VirtualGateways    int    `yaml:"virtual_gateways" json:"virtual_gateways" cbor:"virtual_gateways"`
+	VehiclesPerGateway int    `yaml:"vehicles_per_gateway" json:"vehicles_per_gateway" cbor:"vehicles_per_gateway"`
 }
 
 // GatewayConfig config for a Gateway instance.

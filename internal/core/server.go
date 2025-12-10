@@ -1,4 +1,4 @@
-// Package core implements the Fog server — registry, WebSocket, telemetry & control APIs.
+// Package core implements the server
 package core
 
 import (
@@ -31,7 +31,7 @@ type Session struct {
 	Slot           int           // Slot TDMA được cấp phát
 }
 
-// Server là lõi quản lý của hệ thống Fog
+// Server là lõi quản lý của hệ thống
 type Server struct {
 	Address    string
 	AppAddress string
