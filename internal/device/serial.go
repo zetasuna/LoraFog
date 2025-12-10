@@ -181,7 +181,7 @@ func (s *Serial) ReadBytes(timeout time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("read payload failed (expect %d bytes): %w", length, err)
 	}
 
-	slog.Debug("[Serial] Read packet success", "len", length)
+	slog.Info("[Serial] Read packet success", "length", length)
 	return payload, nil
 }
 

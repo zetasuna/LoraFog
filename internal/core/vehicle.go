@@ -502,6 +502,36 @@ func (v *Vehicle) handleBeacon(ctx context.Context, b model.BeaconMessage) {
 				"[Vehicle] Lost slot allocation",
 				"vehicle", v.ID, "state", v.state,
 			)
+
+			// sleep to send HELLO (retry)
+			v.sleepUntil(ctx, registerTime)
+			if v.assignedSlot != -1 {
+				v.state = StateSending
+				slog.Info(
+					"[Vehicle] Slot assigned during wait => Skip resend",
+					"vehicle", v.ID, "state", v.state, "slot", v.assignedSlot,
+				)
+				// start TDMA for this cycle if possible
+				go v.performTDMA(ctx, b, localCycleStart)
+				return
+			}
+
+			msg := model.HelloMessage{
+				Type:      model.PacketHello,
+				VehicleID: v.ID,
+			}
+			payload, _ := cbor.Marshal(msg)
+			if err := v.lora.WriteBytes(payload); err != nil {
+				slog.Warn(
+					"[Vehicle] Failed to write HELLO (Lost slot)",
+					"vehicle", v.ID, "state", v.state, "error", err,
+				)
+			} else {
+				slog.Info(
+					"[Vehicle] Sent HELLO (Lost slot)",
+					"vehicle", v.ID, "state", v.state,
+				)
+			}
 		}
 	}
 }
