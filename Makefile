@@ -4,8 +4,8 @@
 # Description: Build, run, test, and manage LoraFog components
 # ===========================================
 
-APP_NAME := lora_fog
-MAIN := cmd/lora_fog/main.go
+APP_NAME := lora
+MAIN := cmd/lora/main.go
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/$(APP_NAME)
 CONFIG := configs/config.yml
