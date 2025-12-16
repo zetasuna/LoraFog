@@ -28,7 +28,7 @@ const (
 	// ControlWindowMs  = LoraDuration * 2
 	// RegisterWindowMs = LoraDuration * 2
 	// ReadTimeout      = 100 * time.Millisecond
-	LoraDuration     = int64(100)
+	LoraDuration     = int64(500)
 	GuardTimeMs      = LoraDuration / 2
 	SlotWindowMs     = LoraDuration * 1
 	BeaconWindowMs   = LoraDuration * 1

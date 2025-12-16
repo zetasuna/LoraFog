@@ -326,7 +326,7 @@ func (v *Vehicle) loraLoop(ctx context.Context) {
 				}
 			}
 		default:
-			slog.Info(
+			slog.Debug(
 				"[Vehicle] Received unhandled message type",
 				"vehicle", v.ID, "state", v.state, "type", msgType,
 			)

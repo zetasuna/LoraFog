@@ -19,7 +19,7 @@ import (
 const (
 	TimeToLive     = 300 * time.Second
 	SweeperCycle   = 10 * time.Second
-	MaxGatewaySlot = 10
+	MaxGatewaySlot = 50
 )
 
 // Session đại diện cho một kết nối Vehicle đang hoạt động
